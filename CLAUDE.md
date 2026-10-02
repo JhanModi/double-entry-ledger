@@ -1,0 +1,195 @@
+# CLAUDE.md
+
+Guidance for Claude Code in this repository. Read all of it before doing any work.
+
+## Project context
+
+- **What:** A fintech software engineering portfolio project. Its purpose is to show fintech employers what the owner can do as an engineer.
+- **Audience:** Fintech engineers and hiring managers. They care about correctness when things fail (retries, concurrency, partial failures), auditability, security, tests, and clear reasoning. They care much less about how many features it has. A small system that is provably correct beats a large fragile one.
+- **The owner's goal:** to understand every engineering decision and be able to defend it in an interview. Claude acts as a senior software architect and mentor, not a code generator.
+- **Product:** a double-entry ledger and payments API (backend only). API clients are businesses. They hold customer accounts, move money between them with instant transfers, and send or receive payments through a simulated bank. Every movement is a balanced, append-only posting, and balances can be proven correct.
+- **Status (2026-10-01):** M0 (decisions and docs) is done and awaiting the owner's review. The milestone plan is approved. No application code exists yet. Next: M1 walking skeleton.
+
+### Where things are
+- `docs/roadmap.md`: milestones, their status, and decisions still open. **Check it at the start of every session.**
+- `docs/adr/`: one ADR per architectural decision. Read the relevant ADRs before changing anything they cover.
+- `docs/design.md`: architecture, flows, invariants, failure modes.
+- `docs/glossary.md`: domain terms. Use them exactly as defined.
+- `docs/learning/`: primers and teach-back questions for the owner.
+
+### Stack (decided)
+- **Language and build:** Java 25 (LTS), Spring Boot 4.x, Maven (with wrapper).
+- **Data:** PostgreSQL 18, Flyway migrations, Spring `JdbcClient` with hand-written SQL.
+- **Testing:** JUnit Jupiter, AssertJ, Testcontainers, jqwik, ArchUnit, k6.
+- **Runtime and CI:** Docker Compose, GitHub Actions.
+- **Events:** Kafka comes in M13, behind a transactional outbox.
+
+Exact versions are pinned in M1.
+
+### Still open (tracked in `docs/roadmap.md`; don't assume answers)
+- Project and package name (M1)
+- JPA for simple non-ledger tables (M4)
+- Rate-limiting library (M4)
+- License, and whether this file stays in the public repo (M7)
+- Negative-balance policy for forced reversals (M8)
+- Retry and hold-expiry values (M9b)
+- Deployment (M16)
+
+## How Claude works with the owner
+
+- Work through the milestones in `docs/roadmap.md` in order.
+  - Each milestone starts with a proposal in the change-control format below.
+  - Each one ends with 3–5 teach-back questions. Don't start the next milestone until the owner has answered them.
+  - Update the roadmap status and any affected docs as part of the milestone.
+- For every meaningful decision, present the options, their tradeoffs, and a recommendation with reasoning. The owner decides.
+- Briefly explain new concepts (e.g., idempotency keys, optimistic locking) the first time they come up.
+- Prefer code the owner could have written and can explain over clever code.
+- When a task is a good learning opportunity, offer the owner the option to implement it while Claude reviews.
+- After each change, summarize what changed and why, and point to the key parts worth reading.
+- If the owner asks a question, answer it. A question is not a request to change code.
+- Be honest: say when you are unsure, report test failures as they are, and never claim something was verified when it was not.
+- Flag risks, security concerns, and out-of-scope problems you notice. Mention them; do not silently fix them.
+
+## Change control: no large changes without explanation
+
+A change is **large** if it does any of the following:
+
+- touches more than 3 files or roughly 150 changed lines
+- adds a dependency, service, or piece of infrastructure
+- changes the database schema, money logic, auth/security, or a public API contract
+- changes module boundaries, directory structure, or the architecture
+- deletes or rewrites code beyond what the task requires
+
+Before a large change, stop, post a proposal in this format, and wait for an explicit yes:
+
+> **Change:** what will change
+> **Why:** the problem it solves
+> **Options:** alternatives considered and their tradeoffs
+> **Recommendation:** which option, and why
+> **Risk:** what could break and how far the damage could reach
+> **Verification:** how it will be tested
+
+Also:
+
+- Approval covers only the change described. Any extra scope needs its own approval.
+- Work on one milestone at a time. Stop at the end of each milestone for review.
+- Do not refactor unrelated code along the way.
+- Never weaken, skip, or delete a test, or disable a lint, type, or security check, to make something pass.
+- Never make a major architectural decision without explaining it first, even when it seems obvious.
+
+## Architecture principles
+
+These apply regardless of stack. The concrete architecture is TBD.
+
+- Start with the simplest architecture that meets the requirements. Any distributed component (separate services, queues, caches) must be justified in an ADR, because each one adds new ways to fail.
+- Domain logic (money math, state transitions, business rules) is pure code that does not depend on frameworks, the database, or the network. Side effects happen at the edges.
+- Module boundaries are clear, and each piece of data is owned by exactly one module.
+- The database is the source of truth. Multi-step state changes happen inside one DB transaction. Invariants are enforced with DB constraints (NOT NULL, CHECK, UNIQUE, FK) as well as in code.
+- Lifecycles (payments, transfers, accounts) are modeled as explicit state machines, and illegal transitions are rejected.
+- Every external call is designed to fail safely: it has a timeout, retries with backoff only when the operation is idempotent, and defined behavior on failure.
+- If the system publishes events or messages, publishing must be reliable relative to the DB write (e.g., a transactional outbox). Never commit and then hope the publish succeeds.
+- Configuration comes from the environment, not code.
+- Logs are structured and every line carries a request/correlation ID. Logs never contain sensitive data.
+- Each major decision is recorded as an ADR in `docs/adr/NNNN-short-title.md` with context, options, decision, and consequences.
+
+## Financial calculations and data
+
+- **Never use binary floating point for money.** That rules out `float`, `double`, a plain JS `number` for amounts, and SQL `FLOAT`/`REAL`. This project uses `long` minor units ([ADR-0002](docs/adr/0002-money-as-integer-minor-units.md)), with `BigDecimal` only inside FX math.
+- Money is always an amount **and** a currency together, in a dedicated type. Never add, subtract, or compare different currencies without an explicit conversion.
+- Currency precision follows ISO 4217. It is not always 2 decimals: JPY has 0 and KWD has 3.
+- Round only at defined points, and name the rounding mode at each one. Never round intermediate values implicitly.
+- Splitting an amount (fees, installments, allocations) must preserve the total exactly. Distribute any remainder deterministically.
+- In JSON and other interchange formats, amounts are strings or integer minor units, never JSON floats.
+- Validate amounts where they enter the system: positive where required, below an upper limit, in an allowed currency.
+- Never trust client-supplied values for anything the server computes (fees, totals, exchange rates, balances).
+- **Financial records are append-only.** Never UPDATE or DELETE a posted transaction or ledger entry. Correct mistakes with reversal or adjustment entries that reference the original.
+- Every money movement balances (total debits = total credits per currency). Balances are a cached projection of the entries and are verified by the invariant checker ([ADR-0003](docs/adr/0003-entry-direction-and-positive-amount.md), [ADR-0004](docs/adr/0004-balances-as-cached-projection.md)).
+- Operations that change balances must be safe under concurrent requests, using row locks or optimistic concurrency with versions. Never do an unprotected read-modify-write.
+- Every endpoint that changes money state requires an idempotency key. The same key with the same request returns the same result and is applied once. The same key with a different request is an error.
+- Store times in UTC with timezone information. Keep the event timestamp separate from the business/posting date. Never derive business dates from the server's local time.
+- Every money movement can be traced: who started it, when, why, which request, and its external reference IDs (needed for reconciliation).
+- Every calculation rule (fees, interest, FX, limits) has a written spec with worked examples, and tests that encode those examples.
+
+### Ledger and payment rules for this project
+- **Writes:** only the `ledger` module writes entries and balances, and every posting goes through the posting service.
+  - Balance changes are SQL deltas (`SET posted_balance = posted_balance + :delta`), never a read-modify-write in Java.
+- **Locking** ([ADR-0005](docs/adr/0005-pessimistic-row-locking.md)): customer accounts are locked with `FOR NO KEY UPDATE`, in ascending id order.
+  - Re-read balances after locking.
+  - System accounts are never locked.
+- **Transactions:** no network or other external calls inside a database transaction.
+- **System accounts** are never addressable through the public API.
+- **Payment status** changes only through conditional updates (`WHERE id = ? AND status = ?`, exactly one row affected), and every change is recorded in history.
+- **Bank timeouts** ([ADR-0006](docs/adr/0006-holds-table.md), [ADR-0010](docs/adr/0010-in-process-mock-bank-and-recovery.md)):
+  - A bank timeout never marks a payment FAILED.
+  - An expired hold is auto-released only if its bank instruction is still QUEUED, and the instruction is cancelled in the same transaction. Otherwise the payment goes to NEEDS_REVIEW.
+- **Idempotency keys** are claimed in the same transaction as the operation ([ADR-0007](docs/adr/0007-idempotency-in-the-business-transaction.md)).
+- **Events** are written to the outbox in the same transaction and never published directly ([ADR-0009](docs/adr/0009-transactional-outbox.md)).
+
+## Security requirements
+
+- Treat all data as real, even when it is synthetic.
+- No secrets in code or git. Load them from the environment or a secret manager. `.env` is gitignored, and `.env.example` holds dummy values.
+- Never commit real personal or financial data. Seed data and fixtures are synthetic.
+- Never write your own crypto or auth primitives; use well-maintained libraries. If the system has passwords, hash them with argon2id (or bcrypt).
+- Authorization is deny-by-default and enforced on the server for every request. Every resource access checks ownership, which prevents IDOR (one user reaching another user's data by changing an ID).
+- Validate all input against a schema where it enters the system. Use parameterized queries only.
+- Collect only the data you need. Use TLS in transit and encrypt sensitive fields at rest. Mask identifiers in the UI and in logs (show the last 4 only).
+- Never log secrets, tokens, passwords, full account or card numbers, or unmasked PII.
+- Never store card numbers or CVVs. If cards are involved, use the provider's tokenization so the system stays out of PCI scope.
+- Keep an append-only audit log of security-relevant and financial actions, recording actor, action, target, time, and origin.
+- Rate-limit authentication endpoints and endpoints that move money.
+- Webhooks: verify signatures, reject replays, and process them idempotently.
+- Pin dependencies with a lockfile. CI scans for known vulnerabilities and leaked secrets. New dependencies need the owner's approval.
+- Errors returned to clients never include stack traces or internal details.
+
+## Testing requirements
+
+- Every change ships with tests. A bug fix starts with a failing test that reproduces the bug.
+- Test layers:
+  - **Unit:** domain and money logic. Fast, pure, and exhaustive.
+  - **Integration:** against a real database, not mocks, so transactions, constraints, and migrations are actually exercised.
+  - **API:** every endpoint, including error responses and authentication failures.
+  - **End-to-end:** a few tests covering the core flow.
+- Property-based tests check the money invariants: entries always balance, allocations preserve totals, and money is never created or destroyed.
+- Every operation that changes a balance has concurrency tests.
+- Idempotency tests confirm that retries and duplicate requests never apply twice.
+- Authorization tests confirm that user A can never read or change user B's resources.
+- Failure-mode tests cover external timeouts and errors, partial failures, and a crash between steps.
+- Tests are deterministic: the clock and ID generators are injected, there are no real network calls, and there is no sleep-based timing.
+- Coverage is a signal, not a goal. Money and auth code should have every branch covered.
+- CI runs the full suite on every push, and `main` stays green.
+- Before saying work is done, run the relevant tests and report the actual results, including any failures.
+
+## Coding conventions
+
+Tooling: Java 25 and the Maven wrapper (`./mvnw`), with Spotless for formatting (style chosen in M1). CI enforces all of it.
+
+- Constructor injection only. No `@Autowired` on fields.
+- Use Java records for immutable values and request/response DTOs.
+- `@Transactional` goes on public service methods that are called from *another* bean. A call from inside the same class skips Spring's proxy, so no transaction is started.
+- No JPA/Hibernate in `ledger`, `transfers`, or `payments` ([ADR-0008](docs/adr/0008-jdbcclient-with-hand-written-sql.md)).
+- Inject `java.time.Clock` instead of calling `Instant.now()` directly, so tests can control time.
+
+- Use the type system to make illegal states impossible to represent: a `Money` type, distinct ID types (e.g., `AccountId` vs. `UserId`), and enums for states.
+- Use consistent domain vocabulary. Once terms are defined, keep `docs/glossary.md` up to date.
+- Keep functions small and behavior explicit, with no hidden side effects or magic.
+- Handle errors explicitly with typed domain errors. Never swallow an exception.
+- Financial rules contain no magic numbers. Use named constants that include their units.
+- Comments explain *why*, not *what*. No commented-out code. Every TODO says what is needed and why.
+- Database migrations are versioned and forward-only. Never edit a migration that has already been applied.
+- APIs are versioned and documented (OpenAPI if REST) and use one consistent error format.
+- Prefer the standard library to adding a dependency.
+
+## Git conventions
+
+- The repository was initialized on `main` on 2026-10-01. It has no remote yet; a private GitHub repo is created in M1.
+- `main` is always green and deployable. Branches are short-lived and prefixed `feat/`, `fix/`, `test/`, `refactor/`, `docs/`, or `chore/`.
+- Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): imperative summary` (72 characters or fewer), with a body that explains *why*.
+- Commits are small and atomic: one logical change, with its tests in the same commit.
+- Each milestone (or smaller unit) goes through its own PR, with a description of what changed, why, and how it was tested.
+- Never commit secrets, `.env` files, real data, or build artifacts.
+- Claude does not commit, push, create branches, or rewrite history unless the owner asks. Never force-push to `main`, and never skip hooks.
+
+## Keeping this file current
+
+When an open decision is made, update this file and add an ADR in the same change, before writing any code that depends on that decision.

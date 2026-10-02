@@ -1,0 +1,27 @@
+# Secrets and local environment (copy .env.example to .env; never commit .env)
+.env
+.env.*
+!.env.example
+
+# Maven build output
+target/
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and local test output
+*.log
+k6-results/
+
+# Claude Code per-user settings
+.claude/settings.local.json
