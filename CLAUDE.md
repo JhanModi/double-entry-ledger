@@ -31,6 +31,8 @@ Guidance for Claude Code in this repository. Read all of it before doing any wor
 - Spotless 3.10.3 with Palantir Java Format 2.101.0
 - `postgres:18` in both Compose and tests
 - gitleaks v8.30.1 in CI, pinned by image digest
+- jqwik 1.10.1 and ArchUnit 1.5.1 (test only; versions in `pom.xml`)
+- Spring Security and Bean Validation (starters managed by Spring Boot, added in M4a)
 
 Maven versions live in `pom.xml`, and Dependabot proposes Maven and GitHub Actions updates. The gitleaks image in `ci.yml` is bumped by hand.
 
@@ -43,9 +45,7 @@ Maven versions live in `pom.xml`, and Dependabot proposes Maven and GitHub Actio
 - `docker compose up -d`, then `./mvnw spring-boot:run`: local database and app. Health check at `http://localhost:8080/actuator/health`.
 
 ### Still open (tracked in `docs/roadmap.md`; don't assume answers)
-- Maven group ID and Java base package (M1)
-- JPA for simple non-ledger tables (M4)
-- Rate-limiting library (M4)
+- Rate-limiting library (M4b)
 - License, and whether this file stays in the public repo (M7)
 - Negative-balance policy for forced reversals (M8)
 - Retry and hold-expiry values (M9b)
@@ -53,6 +53,14 @@ Maven versions live in `pom.xml`, and Dependabot proposes Maven and GitHub Actio
 
 ## How Claude works with the owner
 
+### The owner's permanent rules
+These apply to every session and every milestone. Details are in the sections referenced.
+1. **The owner does all Git and GitHub operations.** Claude may only run the read-only commands `git status`, `git diff`, `git log`, and `git show`. Claude never commits, pushes, or asks to commit. At the end of each milestone, Claude lists the changed files and suggests a commit message. See "Git conventions."
+2. **Claude writes all the code.** No implementation exercises are offered.
+3. **Proposal before code.** Every milestone starts with a proposal in the change-control format below. **No code is written for a milestone until the owner explicitly approves its proposal.** Approval covers only what was proposed.
+4. **Every milestone ends with** 3–5 teach-back questions and a short **"Walk me through it"** section: the 2–3 most important pieces of code, explained in plain language the way the owner would explain them in an interview. The next milestone doesn't start until the owner has answered the teach-back.
+
+### Working practices
 - Work through the milestones in `docs/roadmap.md` in order.
   - Each milestone starts with a proposal in the change-control format below.
   - Each one ends with 3–5 teach-back questions. Don't start the next milestone until the owner has answered them.
@@ -96,7 +104,7 @@ Also:
 
 ## Architecture principles
 
-These apply regardless of stack. The concrete architecture is TBD.
+These apply regardless of stack. The concrete architecture is in `docs/design.md` and the ADRs (a modular monolith, ADR-0001).
 
 - Start with the simplest architecture that meets the requirements. Any distributed component (separate services, queues, caches) must be justified in an ADR, because each one adds new ways to fail.
 - Domain logic (money math, state transitions, business rules) is pure code that does not depend on frameworks, the database, or the network. Side effects happen at the edges.
@@ -211,7 +219,7 @@ Tooling: Java 25 and the Maven wrapper (`./mvnw`), with Spotless running Palanti
 - Constructor injection only. No `@Autowired` on fields.
 - Use Java records for immutable values and request/response DTOs.
 - `@Transactional` goes on public service methods that are called from *another* bean. A call from inside the same class skips Spring's proxy, so no transaction is started.
-- No JPA/Hibernate in `ledger`, `transfers`, or `payments` ([ADR-0008](docs/adr/0008-jdbcclient-with-hand-written-sql.md)).
+- No JPA/Hibernate anywhere: all data access is `JdbcClient` with hand-written SQL ([ADR-0008](docs/adr/0008-jdbcclient-with-hand-written-sql.md), decided in M4).
 - Inject `java.time.Clock` instead of calling `Instant.now()` directly, so tests can control time.
 
 - Use the type system to make illegal states impossible to represent: a `Money` type, distinct ID types (e.g., `AccountId` vs. `UserId`), and enums for states.

@@ -4,6 +4,49 @@ Each milestone opens with a short proposal (the change-control format in `CLAUDE
 
 Status: ✅ done · 🔍 in review · ⏳ not started
 
+## Current work: M4a (checkpoint 2026-10-02)
+
+### Finished
+- **Code:**
+  - **V4 migration:** `api_clients`; `api_keys` (hash-only); `accounts.client_id`, with a CHECK and the identity trigger extended so an account's owner never changes; grants for the new tables.
+  - **`clients` module:** key format, constant-time verifier, client service, the `clients create` command-line bootstrap, scopes.
+  - **`web` module:** deny-by-default security rules, bearer-key filter, Problem Details for 401/403 and everything else, the accounts controller.
+  - **Ledger:** owner-scoped lookup via `LedgerQueries.accountOwnedBy`.
+- **Tests:** `./mvnw verify` is green: 73 unit tests, 90 integration tests, and the Spotless check.
+- **Planted-bug checks** (in a scratchpad copy): ignoring revocation, leaky ownership SQL, and `authenticated()` in place of `denyAll()`. Each was caught by its own test.
+- **Local end-to-end:**
+  - The CLI created two clients.
+  - `curl` returned 201 on create and 200 on read, a 404 for the other client's account identical to a random id's, 401 without a key, and 403 for `/actuator/env` with a key.
+  - No key secrets appeared in the logs or the database.
+- **Fixed during verification:**
+  - The command-line mode failed to start, because the security config needs a web server. Fixed with `@ConditionalOnWebApplication`; `ClientsCommandIT` now runs without a web server.
+  - Spring Boot's default generated-password user is excluded.
+- **Docs:** ADR-0016, ADR-0017, primer 03, design §8 and the failure-modes table, glossary, the README's "Use the API" section, and the CLAUDE.md API rules and permanent rules.
+
+### Left to close M4a
+1. ✅ **Committed** as `a2d7803`. The checkpoint edits to `CLAUDE.md` and `docs/roadmap.md` came after it and still need a commit.
+2. ⏳ **CI green:** waiting for the owner to confirm (Claude can't see GitHub).
+3. ✅ **Teach-back answered** (all five correct, feedback given):
+   1. What's the difference between a 401 and a 403 in this API? Give one request that gets each.
+   2. Why does the verifier compare hashes with `MessageDigest.isEqual`, and why does it still compare against a dummy hash when the key id doesn't exist?
+   3. Why is CSRF protection turned off, and what would have to change about the API for that to become unsafe?
+   4. Bob requests Alice's account id. Walk through what happens, and explain why he gets a 404 rather than a 403.
+   5. Why does the first API key come from a command-line mode instead of an HTTP endpoint? What bug did the end-to-end run catch, and why did the original test miss it?
+4. **Then** mark M4a ✅, give feedback on the answers, and post the **M4b proposal** (row below). M4b must also state clearly that transfers aren't safe to retry until M6 (idempotency).
+
+### Failing tests
+None. Known gaps that aren't failures:
+- **Constant-time comparison** is verified by code review, not by a test, because timing tests are unreliable.
+- **Mockito prints a "self-attaching" warning** during integration tests. It's harmless today but will break on a future JDK. Fix it later by adding Mockito as a Java agent in the Surefire/Failsafe `argLine`.
+
+### Decisions made this session that aren't recorded elsewhere
+- **Invalid credentials are always 401.** An `Authorization` header with an invalid key gets 401 even on public paths such as `/actuator/health`. Only a request with *no* header is treated as anonymous.
+- **Actuator endpoints other than health are never reachable:** 401 without a key, 403 with one (`denyAll`).
+- **History paging:** the page size defaults to 50, with a maximum of 100, and the cursor is the id of the last entry returned.
+- **Unknown JSON fields are ignored** (Spring Boot's default). That's how a `clientId` in a request body gets harmlessly dropped. M4b should decide whether to reject unknown fields instead.
+- **`spring-boot-starter-security-test` is on the test classpath but unused,** since tests authenticate over real HTTP with real keys. Keep or remove it in M4b.
+- **The invariant checker's SQL,** planned as an M3a owner exercise, was written by Claude at the owner's request. The owner later made "Claude writes all code" a permanent rule.
+
 ## Tier 1: a strong portfolio piece on its own
 
 | | Milestone | Scope |
