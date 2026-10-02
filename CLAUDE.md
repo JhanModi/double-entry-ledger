@@ -7,8 +7,9 @@ Guidance for Claude Code in this repository. Read all of it before doing any wor
 - **What:** A fintech software engineering portfolio project. Its purpose is to show fintech employers what the owner can do as an engineer.
 - **Audience:** Fintech engineers and hiring managers. They care about correctness when things fail (retries, concurrency, partial failures), auditability, security, tests, and clear reasoning. They care much less about how many features it has. A small system that is provably correct beats a large fragile one.
 - **The owner's goal:** to understand every engineering decision and be able to defend it in an interview. Claude acts as a senior software architect and mentor, not a code generator.
+- **Project name:** `double-entry-ledger`.
 - **Product:** a double-entry ledger and payments API (backend only). API clients are businesses. They hold customer accounts, move money between them with instant transfers, and send or receive payments through a simulated bank. Every movement is a balanced, append-only posting, and balances can be proven correct.
-- **Status (2026-10-01):** M0 (decisions and docs) is done and awaiting the owner's review. The milestone plan is approved. No application code exists yet. Next: M1 walking skeleton.
+- **Status (2026-10-02):** M1 (walking skeleton) is implemented and awaiting the owner's review. No ledger features exist yet.
 
 ### Where things are
 - `docs/roadmap.md`: milestones, their status, and decisions still open. **Check it at the start of every session.**
@@ -24,10 +25,23 @@ Guidance for Claude Code in this repository. Read all of it before doing any wor
 - **Runtime and CI:** Docker Compose, GitHub Actions.
 - **Events:** Kafka comes in M13, behind a transactional outbox.
 
-Exact versions are pinned in M1.
+**Pinned versions (M1):**
+- Spring Boot 4.1.1 (it manages Testcontainers 2.x, Flyway, and the Postgres driver)
+- Maven 3.9.16, via wrapper 3.3.4
+- Spotless 3.10.3 with Palantir Java Format 2.101.0
+- `postgres:18` in both Compose and tests
+- gitleaks v8.30.1 in CI, pinned by image digest
+
+Maven versions live in `pom.xml`, and Dependabot proposes Maven and GitHub Actions updates. The gitleaks image in `ci.yml` is bumped by hand.
+
+### Commands
+- `./mvnw verify` (`.\mvnw verify` in PowerShell): compile, unit tests, integration tests, and format check. This is exactly what CI runs. **Docker must be running.**
+- `./mvnw test`: unit tests only. Fast, no Docker needed.
+- `./mvnw spotless:apply`: fix formatting.
+- `docker compose up -d`, then `./mvnw spring-boot:run`: local database and app. Health check at `http://localhost:8080/actuator/health`.
 
 ### Still open (tracked in `docs/roadmap.md`; don't assume answers)
-- Project and package name (M1)
+- Maven group ID and Java base package (M1)
 - JPA for simple non-ledger tables (M4)
 - Rate-limiting library (M4)
 - License, and whether this file stays in the public repo (M7)
@@ -145,6 +159,9 @@ These apply regardless of stack. The concrete architecture is TBD.
 ## Testing requirements
 
 - Every change ships with tests. A bug fix starts with a failing test that reproduces the bug.
+- **Naming:**
+  - `*Test` classes are unit tests. They need no Docker and are run by Surefire in `./mvnw test`.
+  - `*IT` classes are integration tests. They are run by Failsafe in `./mvnw verify` and use Testcontainers through `@Import(TestcontainersConfiguration.class)`.
 - Test layers:
   - **Unit:** domain and money logic. Fast, pure, and exhaustive.
   - **Integration:** against a real database, not mocks, so transactions, constraints, and migrations are actually exercised.
@@ -162,7 +179,9 @@ These apply regardless of stack. The concrete architecture is TBD.
 
 ## Coding conventions
 
-Tooling: Java 25 and the Maven wrapper (`./mvnw`), with Spotless for formatting (style chosen in M1). CI enforces all of it.
+Tooling: Java 25 and the Maven wrapper (`./mvnw`), with Spotless running Palantir Java Format. CI enforces all of it.
+
+- Base package: `io.github.jhanmodi.ledger`. Modules are subpackages, e.g. `io.github.jhanmodi.ledger.money`.
 
 - Constructor injection only. No `@Autowired` on fields.
 - Use Java records for immutable values and request/response DTOs.
@@ -182,13 +201,20 @@ Tooling: Java 25 and the Maven wrapper (`./mvnw`), with Spotless for formatting 
 
 ## Git conventions
 
-- The repository was initialized on `main` on 2026-10-01. It has no remote yet; a private GitHub repo is created in M1.
+### Owner-only Git rule (permanent)
+- **The owner does every Git and GitHub operation that changes the repo or talks to GitHub.** Claude never runs `git add`, `commit`, `push`, `pull`, `fetch`, `branch`, `merge`, `checkout`/`switch`, `reset`, `stash`, `tag`, or `remote`, or any GitHub CLI (`gh`) command. Claude never asks or offers to commit.
+- **Allowed read-only commands:** `git status`, `git diff`, `git log`, `git show`.
+- Creating or editing files is fine, including GitHub Actions workflows and Dependabot config.
+- **At the end of each milestone,** Claude lists the files it changed and suggests a commit message (plus a PR description if useful). The owner does the rest.
+
+### Conventions for the owner's commits
+- The repository lives on GitHub (branch `main`). The owner manages the remote.
 - `main` is always green and deployable. Branches are short-lived and prefixed `feat/`, `fix/`, `test/`, `refactor/`, `docs/`, or `chore/`.
 - Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): imperative summary` (72 characters or fewer), with a body that explains *why*.
 - Commits are small and atomic: one logical change, with its tests in the same commit.
 - Each milestone (or smaller unit) goes through its own PR, with a description of what changed, why, and how it was tested.
 - Never commit secrets, `.env` files, real data, or build artifacts.
-- Claude does not commit, push, create branches, or rewrite history unless the owner asks. Never force-push to `main`, and never skip hooks.
+- Never force-push to `main`, and never skip hooks.
 
 ## Keeping this file current
 

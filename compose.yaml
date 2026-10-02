@@ -1,0 +1,25 @@
+# Local development database. Start with `docker compose up -d`; values come from .env (copy .env.example).
+# Fixed project name, so container and volume names don't depend on the folder the repo was cloned into.
+name: double-entry-ledger
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports:
+      # Bound to 127.0.0.1 so the database is reachable only from this machine, not the local network.
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    volumes:
+      # Postgres 18 images keep data under /var/lib/postgresql (older images used /var/lib/postgresql/data).
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data:

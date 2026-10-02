@@ -117,7 +117,13 @@ These must hold at all times. The invariant checker verifies the ones that can b
 
 ## 9. Testing
 
-*Filled in from M1.* Strategy: unit, property-based, integration against real Postgres, concurrency, API, architecture, and load tests. The invariant checker runs after every integration, concurrency, and load test.
+Strategy: unit, property-based, integration against real Postgres, concurrency, API, architecture, and load tests. The invariant checker runs after every integration, concurrency, and load test.
+
+**In place since M1:**
+- **Unit tests** (`*Test`, Surefire, `./mvnw test`): no Docker.
+- **Integration tests** (`*IT`, Failsafe, `./mvnw verify`): boot the real application against `postgres:18` in Docker through Testcontainers. `@ServiceConnection` points the datasource at the container. The Spring test context is cached, so test classes with the same configuration share one container.
+- **Current coverage** (`ApplicationIT`): the health endpoint is UP; Actuator endpoints other than `health` return 404; Flyway created and seeded `currencies`.
+- **CI** (`.github/workflows/ci.yml`): `./mvnw verify` on Temurin 25, plus a gitleaks scan of the full git history.
 
 ## 10. Operations
 

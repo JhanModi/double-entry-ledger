@@ -8,8 +8,8 @@ Status: ✅ done · 🔍 in review · ⏳ not started
 
 | | Milestone | Scope |
 |---|---|---|
-| 🔍 | **M0 Decisions & repo** | git init, `.gitignore`, `.env.example`; CLAUDE.md decisions; ADRs 0001–0012; design doc skeleton, glossary, roadmap, primer. No app code. |
-| ⏳ | **M1 Walking skeleton** | Maven project, Docker Compose (Postgres), Flyway baseline, Actuator health check, one Testcontainers test, GitHub Actions CI, Spotless. Needs a private GitHub repo. |
+| ✅ | **M0 Decisions & repo** | git init, `.gitignore`, `.env.example`; CLAUDE.md decisions; ADRs 0001–0012; design doc skeleton, glossary, roadmap, primer. No app code. |
+| 🔍 | **M1 Walking skeleton** | Maven project, Docker Compose (Postgres), Flyway baseline, Actuator health check, one Testcontainers test, GitHub Actions CI, Dependabot, Spotless. Implemented; awaiting review and a green CI run. |
 | ⏳ | **M2 Money** | `Money`/currency types, overflow-safe arithmetic, allocation, rounding; unit and property tests; ArchUnit "no floats" rule. |
 | ⏳ | **M3 Ledger core** | Schema, constraints, triggers, append-only DB roles; posting service; balance and history reads. |
 | ⏳ | **M4 Transfers API + auth** | API-key filter, scopes, tenant isolation, customer vs. system accounts, admin funding, Problem Details, OpenAPI, audit log. Open question: JPA for non-ledger tables. |
@@ -41,7 +41,6 @@ Status: ✅ done · 🔍 in review · ⏳ not started
 
 | Decision | Milestone |
 |---|---|
-| Project and Java package name; GitHub repo creation | M1 |
 | Spring Data JPA for simple non-ledger tables? ([ADR-0008](adr/0008-jdbcclient-with-hand-written-sql.md)) | M4 |
 | Rate-limiting library | M4 |
 | License; whether `CLAUDE.md` and `docs/learning/` stay in the public repo | M7 |
