@@ -69,6 +69,8 @@ class AppRolePrivilegesIT {
         assertThat(granted)
                 .containsExactly(
                         "accounts: INSERT, SELECT",
+                        "api_clients: INSERT, SELECT",
+                        "api_keys: INSERT, SELECT",
                         "currencies: SELECT",
                         "entries: INSERT, SELECT",
                         "ledger_transactions: INSERT, SELECT");
@@ -88,7 +90,10 @@ class AppRolePrivilegesIT {
 
         assertThat(granted)
                 .containsExactly(
-                        "accounts.held_balance: UPDATE", "accounts.posted_balance: UPDATE", "accounts.status: UPDATE");
+                        "accounts.held_balance: UPDATE",
+                        "accounts.posted_balance: UPDATE",
+                        "accounts.status: UPDATE",
+                        "api_keys.revoked_at: UPDATE");
     }
 
     // --- Ledger history can't be changed ---
@@ -107,11 +112,22 @@ class AppRolePrivilegesIT {
     void cannotChangeWhatAnAccountIsOrDeleteOne() {
         // "SET x = x" changes nothing, so the identity trigger would let it through. Only the missing privilege stops
         // it.
-        for (String column : List.of("id", "kind", "type", "normal_side", "currency", "created_at")) {
+        for (String column : List.of("id", "kind", "type", "normal_side", "currency", "client_id", "created_at")) {
             assertDenied("UPDATE accounts SET " + column + " = " + column);
         }
         assertDenied("DELETE FROM accounts");
         assertDenied("TRUNCATE accounts");
+    }
+
+    @Test
+    void cannotRewriteClientsOrKeys() {
+        // A compromised app must not be able to re-enable a disabled client, un-revoke a key, or swap in a known hash.
+        assertDenied("UPDATE api_clients SET status = 'ACTIVE'");
+        for (String column : List.of("client_id", "key_id", "secret_hash", "scopes", "created_at")) {
+            assertDenied("UPDATE api_keys SET " + column + " = " + column);
+        }
+        assertDenied("DELETE FROM api_keys");
+        assertDenied("DELETE FROM api_clients");
     }
 
     // --- The guards can't be switched off ---

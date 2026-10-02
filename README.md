@@ -2,7 +2,12 @@
 
 A double-entry ledger and payments API in Java and Spring Boot.
 
-> **Status: early development.** This is a walking skeleton: the build, database migrations, a health check, integration tests against real Postgres, and CI. No ledger features exist yet. See the [roadmap](docs/roadmap.md).
+> **Status: early development.** What exists today:
+> - the double-entry ledger core
+> - least-privilege database roles
+> - an authenticated API for opening accounts and reading balances and history
+>
+> Transfers over the API come next. See the [roadmap](docs/roadmap.md).
 
 ## Prerequisites
 
@@ -32,6 +37,25 @@ Maven doesn't need to be installed: the Maven Wrapper (`mvnw`) downloads the pin
    curl http://localhost:8080/actuator/health
    ```
    Expected: HTTP 200 with `"status":"UP"` in the body.
+
+## Use the API
+
+1. Create a client and its first API key with the app's command-line mode. It prints the key **once**, so store it safely.
+   ```bash
+   ./mvnw spring-boot:run "-Dspring-boot.run.arguments=clients create --name=acme --scopes=read,write"
+   ```
+2. With the app running, open a USD account and read it back:
+   ```bash
+   curl -X POST http://localhost:8080/v1/accounts -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" -d '{"currency":"USD"}'
+   ```
+   ```bash
+   curl http://localhost:8080/v1/accounts/$ACCOUNT_ID -H "Authorization: Bearer $API_KEY"
+   ```
+   ```bash
+   curl "http://localhost:8080/v1/accounts/$ACCOUNT_ID/entries?limit=50" -H "Authorization: Bearer $API_KEY"
+   ```
+
+Amounts are integer minor units plus a currency: `{"amount": 1050, "currency": "USD"}` is $10.50. Errors use RFC 9457 Problem Details. Another client's account returns 404, exactly like one that doesn't exist.
 
 ## Test
 

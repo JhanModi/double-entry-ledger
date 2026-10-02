@@ -12,8 +12,9 @@ Status: ✅ done · 🔍 in review · ⏳ not started
 | ✅ | **M1 Walking skeleton** | Maven project, Docker Compose (Postgres), Flyway baseline, Actuator health check, one Testcontainers test, GitHub Actions CI, Dependabot, Spotless. |
 | ✅ | **M2 Money** | `Money`/currency types, overflow-safe arithmetic, allocation (`allocate()` written by the owner), rounding; unit and property tests; ArchUnit "no floats" rule. |
 | ✅ | **M3a Ledger schema & posting** | Accounts, ledger transactions, entries; DB guards (constraints, deferred balance triggers, append-only triggers); posting service; balance and history reads; invariant checker. |
-| 🔍 | **M3b Least-privilege DB roles** | `ledger_app` group role with column-level grants (V3 written by the owner); the app connects as a restricted login and Flyway as the owner, in local runs and tests. Implemented; awaiting CI and teach-back. |
-| ⏳ | **M4 Transfers API + auth** | API-key filter, scopes, tenant isolation, customer vs. system accounts, admin funding, Problem Details, OpenAPI, audit log. Open question: JPA for non-ledger tables. |
+| ✅ | **M3b Least-privilege DB roles** | `ledger_app` group role with column-level grants (V3 written by the owner); the app connects as a restricted login and Flyway as the owner, in local runs and tests. |
+| 🔍 | **M4a Clients, API keys, accounts API** | `api_clients` and `api_keys`; key format, hashing, and constant-time verification; CLI to create a client and key; Spring Security filter, scopes, deny-by-default; tenant isolation (other tenants' accounts are 404); Problem Details errors; open/read accounts, balances, and history over HTTP. Implemented; awaiting CI and teach-back. |
+| ⏳ | **M4b Transfers, funding, audit log** | Same-client transfers; admin funding from seeded bank-settlement accounts; business errors as Problem Details; append-only audit log and request ids; OpenAPI; rate-limiting decision; reject non-integer amounts. |
 | ⏳ | **M5 Concurrency** | Ordered locking, `lock_timeout`, retries; 1,000-request and deadlock tests, with the invariant checker (built in M3a) run under concurrency. |
 | ⏳ | **M6 Idempotency** | Claim/replay in the same transaction, request hashing, expiry cleanup; same-key concurrency tests. |
 | ⏳ | **M7 Resume checkpoint** | README, short design doc, architecture diagram v1, demo script; gitleaks history scan, license; repo made public (owner's call). Described as a *ledger and transfers API*. |
@@ -42,8 +43,7 @@ Status: ✅ done · 🔍 in review · ⏳ not started
 
 | Decision | Milestone |
 |---|---|
-| Spring Data JPA for simple non-ledger tables? ([ADR-0008](adr/0008-jdbcclient-with-hand-written-sql.md)) | M4 |
-| Rate-limiting library | M4 |
+| Rate-limiting library | M4b |
 | License; whether `CLAUDE.md` and `docs/learning/` stay in the public repo | M7 |
 | Negative-balance policy for forced reversals (default proposal: shortfall to a customer-receivables account) | M8 |
 | `max_attempts`, backoff, hold lifetime | M9b |

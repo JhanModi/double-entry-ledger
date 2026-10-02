@@ -8,6 +8,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.jhanmodi.ledger.TestcontainersConfiguration;
+import io.github.jhanmodi.ledger.clients.ClientService;
 import io.github.jhanmodi.ledger.money.CurrencyMismatchException;
 import io.github.jhanmodi.ledger.money.Money;
 import java.time.LocalDate;
@@ -29,6 +30,9 @@ class PostingServiceIT {
     PostingService postingService;
 
     @Autowired
+    ClientService clientService;
+
+    @Autowired
     AccountService accountService;
 
     @Autowired
@@ -41,7 +45,7 @@ class PostingServiceIT {
 
     @BeforeEach
     void setUp() {
-        ledger = new LedgerFixtures(accountService, postingService);
+        ledger = new LedgerFixtures(accountService, postingService, clientService);
     }
 
     @Test

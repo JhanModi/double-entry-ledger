@@ -8,6 +8,7 @@ import static io.github.jhanmodi.ledger.money.CurrencyCode.USD;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.jhanmodi.ledger.TestcontainersConfiguration;
+import io.github.jhanmodi.ledger.clients.ClientService;
 import io.github.jhanmodi.ledger.money.CurrencyCode;
 import io.github.jhanmodi.ledger.money.Money;
 import java.math.BigInteger;
@@ -47,13 +48,16 @@ class InvariantCheckerIT {
     PostingService postingService;
 
     @Autowired
+    ClientService clientService;
+
+    @Autowired
     JdbcClient jdbc;
 
     LedgerFixtures ledger;
 
     @BeforeEach
     void setUp() {
-        ledger = new LedgerFixtures(accountService, postingService);
+        ledger = new LedgerFixtures(accountService, postingService, clientService);
     }
 
     // --- A correct ledger is reported clean ---

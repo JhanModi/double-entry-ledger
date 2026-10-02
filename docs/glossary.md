@@ -73,7 +73,13 @@ The terms used in code, docs, and the API. Use them consistently, and add to thi
 ## Platform
 
 - **API client.** A business that uses the API (a tenant). It owns customer accounts and API keys.
-- **Scope.** A permission on an API key: `read`, `write`, or `admin`.
+- **API key.** `dbl_<key id>_<secret>`. The *key id* is public and identifies the key. The *secret* is 256 random bits, of which only the SHA-256 hash is stored. Shown once, when it's issued.
+- **Bearer token.** A credential that works for whoever holds it, sent as `Authorization: Bearer <token>`. API keys are bearer tokens, which is why they must never be logged.
+- **Scope.** A permission on an API key: `read`, `write`, or `admin`. Each becomes a Spring Security authority (`SCOPE_read`, …).
+- **401 vs 403.** 401 Unauthorized means "I don't know who you are" (no key, or an invalid one). 403 Forbidden means "I know who you are, and you can't do this" (a valid key without the needed scope).
+- **Deny by default.** Every endpoint needs an explicit security rule; anything without one is refused.
+- **IDOR (insecure direct object reference).** Reaching someone else's data by changing an id in a request. Prevented here by putting the owner in the SQL (ADR-0017).
+- **Problem Details (RFC 9457).** The standard JSON error format (`type`, `title`, `status`, `detail`, `instance`), served as `application/problem+json`.
 - **Tenant isolation.** A client can never see or move another client's money.
 - **FX quote.** A locked exchange rate with an expiry, single-use, bound to one client and currency pair.
 - **Spread.** The difference between the market rate and the quoted rate. The platform's FX revenue, posted to a fee account.

@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.jhanmodi.ledger.OwnerDatabase;
 import io.github.jhanmodi.ledger.TestcontainersConfiguration;
+import io.github.jhanmodi.ledger.clients.ClientService;
 import io.github.jhanmodi.ledger.money.CurrencyCode;
 import io.github.jhanmodi.ledger.money.Money;
 import java.util.ArrayList;
@@ -46,6 +47,9 @@ class LedgerSchemaIT {
     @Autowired
     PostingService postingService;
 
+    @Autowired
+    ClientService clientService;
+
     JdbcClient jdbc;
     TransactionTemplate tx;
     LedgerFixtures ledger;
@@ -54,7 +58,7 @@ class LedgerSchemaIT {
     void setUp() {
         jdbc = owner.jdbc();
         tx = owner.transactions();
-        ledger = new LedgerFixtures(accountService, postingService);
+        ledger = new LedgerFixtures(accountService, postingService, clientService);
     }
 
     // --- Ledger transactions must balance (deferred constraint triggers, checked at COMMIT) ---
@@ -175,9 +179,15 @@ class LedgerSchemaIT {
     @Test
     void whatAnAccountIsNeverChanges() {
         AccountId customer = ledger.customer(USD);
+        String anotherClient = clientService.createClient("another client").toString();
 
         for (String change : List.of(
-                "currency = 'EUR'", "kind = 'SYSTEM'", "type = 'EQUITY'", "created_at = now() - interval '1 day'")) {
+                "currency = 'EUR'",
+                "kind = 'SYSTEM'",
+                "type = 'EQUITY'",
+                "created_at = now() - interval '1 day'",
+                "client_id = '" + anotherClient + "'",
+                "client_id = NULL")) {
             assertThatThrownBy(() -> rollbackOnly(() -> jdbc.sql("UPDATE accounts SET " + change + " WHERE id = :id")
                             .param("id", customer.value())
                             .update()))
@@ -204,31 +214,48 @@ class LedgerSchemaIT {
 
     @Test
     void customerAccountsMustBeLiabilities() {
-        assertThatThrownBy(() -> rollbackOnly(() -> insertAccount("CUSTOMER", "ASSET", "DEBIT", "USD", 0L)))
+        UUID owner = ledger.client().value();
+
+        assertThatThrownBy(() -> rollbackOnly(() -> insertAccount("CUSTOMER", "ASSET", "DEBIT", "USD", 0L, owner)))
                 .rootCause()
                 .hasMessageContaining("accounts_customer_is_liability");
     }
 
     @Test
+    void customerAccountsBelongToAClientAndSystemAccountsToNone() {
+        UUID someClient = ledger.client().value();
+
+        assertThatThrownBy(() -> rollbackOnly(() -> insertAccount("CUSTOMER", "LIABILITY", "CREDIT", "USD", 0L, null)))
+                .rootCause()
+                .hasMessageContaining("accounts_customer_has_client");
+        assertThatThrownBy(() -> rollbackOnly(() -> insertAccount("SYSTEM", "ASSET", "DEBIT", "USD", null, someClient)))
+                .rootCause()
+                .hasMessageContaining("accounts_customer_has_client");
+    }
+
+    @Test
     void onlyCustomerAccountsHaveCachedBalances() {
-        assertThatThrownBy(() -> rollbackOnly(() -> insertAccount("SYSTEM", "ASSET", "DEBIT", "USD", 0L)))
+        UUID owner = ledger.client().value();
+
+        assertThatThrownBy(() -> rollbackOnly(() -> insertAccount("SYSTEM", "ASSET", "DEBIT", "USD", 0L, null)))
                 .rootCause()
                 .hasMessageContaining("accounts_only_customers_cache_balances");
-        assertThatThrownBy(() -> rollbackOnly(() -> insertAccount("CUSTOMER", "LIABILITY", "CREDIT", "USD", null)))
+        assertThatThrownBy(
+                        () -> rollbackOnly(() -> insertAccount("CUSTOMER", "LIABILITY", "CREDIT", "USD", null, owner)))
                 .rootCause()
                 .hasMessageContaining("accounts_only_customers_cache_balances");
     }
 
     @Test
     void theNormalSideMustMatchTheType() {
-        assertThatThrownBy(() -> rollbackOnly(() -> insertAccount("SYSTEM", "ASSET", "CREDIT", "USD", null)))
+        assertThatThrownBy(() -> rollbackOnly(() -> insertAccount("SYSTEM", "ASSET", "CREDIT", "USD", null, null)))
                 .rootCause()
                 .hasMessageContaining("accounts_normal_side_matches_type");
     }
 
     @Test
     void theCurrencyMustBeOneTheLedgerSupports() {
-        assertThatThrownBy(() -> rollbackOnly(() -> insertAccount("SYSTEM", "ASSET", "DEBIT", "GBP", null)))
+        assertThatThrownBy(() -> rollbackOnly(() -> insertAccount("SYSTEM", "ASSET", "DEBIT", "GBP", null, null)))
                 .rootCause()
                 .hasMessageContaining("accounts_currency_fkey");
     }
@@ -312,16 +339,18 @@ class LedgerSchemaIT {
                 .update();
     }
 
-    private void insertAccount(String kind, String type, String normalSide, String currency, Long balance) {
+    private void insertAccount(
+            String kind, String type, String normalSide, String currency, Long balance, UUID clientId) {
         jdbc.sql("""
-                        INSERT INTO accounts (kind, type, normal_side, currency, posted_balance, held_balance)
-                        VALUES (:kind, :type, :normalSide, :currency, :balance, :balance)
+                        INSERT INTO accounts (kind, type, normal_side, currency, posted_balance, held_balance, client_id)
+                        VALUES (:kind, :type, :normalSide, :currency, :balance, :balance, :clientId)
                         """)
                 .param("kind", kind)
                 .param("type", type)
                 .param("normalSide", normalSide)
                 .param("currency", currency)
                 .param("balance", balance, java.sql.Types.BIGINT)
+                .param("clientId", clientId, java.sql.Types.OTHER)
                 .update();
     }
 }

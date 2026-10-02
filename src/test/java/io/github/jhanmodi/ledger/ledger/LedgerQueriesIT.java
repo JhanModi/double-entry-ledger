@@ -7,6 +7,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.jhanmodi.ledger.TestcontainersConfiguration;
+import io.github.jhanmodi.ledger.clients.ClientId;
+import io.github.jhanmodi.ledger.clients.ClientService;
 import io.github.jhanmodi.ledger.money.Money;
 import java.util.ArrayList;
 import java.util.List;
@@ -31,11 +33,14 @@ class LedgerQueriesIT {
     @Autowired
     PostingService postingService;
 
+    @Autowired
+    ClientService clientService;
+
     LedgerFixtures ledger;
 
     @BeforeEach
     void setUp() {
-        ledger = new LedgerFixtures(accountService, postingService);
+        ledger = new LedgerFixtures(accountService, postingService, clientService);
     }
 
     @Test
@@ -132,6 +137,19 @@ class LedgerQueriesIT {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> queries.history(customer, Optional.empty(), 101))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void anAccountIsFoundOnlyByTheClientThatOwnsIt() {
+        AccountId account = ledger.customer(USD);
+        ClientId stranger = clientService.createClient("stranger");
+
+        assertThat(queries.accountOwnedBy(ledger.client(), account).id()).isEqualTo(account);
+        assertThatThrownBy(() -> queries.accountOwnedBy(stranger, account))
+                .isInstanceOf(AccountNotFoundException.class);
+        // System accounts belong to no client, so no client can look one up.
+        assertThatThrownBy(() -> queries.accountOwnedBy(ledger.client(), ledger.bank(USD)))
+                .isInstanceOf(AccountNotFoundException.class);
     }
 
     @Test

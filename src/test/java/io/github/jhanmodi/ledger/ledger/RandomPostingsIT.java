@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
 
 import io.github.jhanmodi.ledger.TestcontainersConfiguration;
+import io.github.jhanmodi.ledger.clients.ClientService;
 import io.github.jhanmodi.ledger.money.CurrencyCode;
 import io.github.jhanmodi.ledger.money.Money;
 import java.util.ArrayList;
@@ -38,6 +39,9 @@ class RandomPostingsIT {
     PostingService postingService;
 
     @Autowired
+    ClientService clientService;
+
+    @Autowired
     LedgerQueries queries;
 
     @Autowired
@@ -48,7 +52,7 @@ class RandomPostingsIT {
 
     @BeforeEach
     void setUp() {
-        ledger = new LedgerFixtures(accountService, postingService);
+        ledger = new LedgerFixtures(accountService, postingService, clientService);
         seed = Long.getLong("randomPostings.seed", ThreadLocalRandom.current().nextLong());
     }
 

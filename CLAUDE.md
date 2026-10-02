@@ -9,7 +9,7 @@ Guidance for Claude Code in this repository. Read all of it before doing any wor
 - **The owner's goal:** to understand every engineering decision and be able to defend it in an interview. Claude acts as a senior software architect and mentor, not a code generator.
 - **Project name:** `double-entry-ledger`.
 - **Product:** a double-entry ledger and payments API (backend only). API clients are businesses. They hold customer accounts, move money between them with instant transfers, and send or receive payments through a simulated bank. Every movement is a balanced, append-only posting, and balances can be proven correct.
-- **Status (2026-10-02):** M3b (least-privilege database roles) is implemented. The owner wrote V3's GRANT statements. `./mvnw verify` passes, and locally the app connects as `ledger_service` while Flyway ran as the owner. Still needed to close M3b: CI green and the owner's teach-back answers.
+- **Status (2026-10-02):** M4 is split into M4a (clients, API keys, accounts API) and M4b (transfers, funding, audit log). M4a is implemented, and `./mvnw verify` passes. Still needed to close it: CI green and the owner's teach-back answers. No JPA: `JdbcClient` everywhere.
 
 ### Where things are
 - `docs/roadmap.md`: milestones, their status, and decisions still open. **Check it at the start of every session.**
@@ -56,11 +56,12 @@ Maven versions live in `pom.xml`, and Dependabot proposes Maven and GitHub Actio
 - Work through the milestones in `docs/roadmap.md` in order.
   - Each milestone starts with a proposal in the change-control format below.
   - Each one ends with 3–5 teach-back questions. Don't start the next milestone until the owner has answered them.
+  - Each one also ends with a short **"Walk me through it"** section: the 2–3 most important pieces of code, explained in plain language the way the owner would explain them in an interview.
   - Update the roadmap status and any affected docs as part of the milestone.
+- **Claude writes all the code in every milestone** (the owner's permanent rule, 2026-10-02). Don't offer implementation exercises.
 - For every meaningful decision, present the options, their tradeoffs, and a recommendation with reasoning. The owner decides.
 - Briefly explain new concepts (e.g., idempotency keys, optimistic locking) the first time they come up.
 - Prefer code the owner could have written and can explain over clever code.
-- When a task is a good learning opportunity, offer the owner the option to implement it while Claude reviews.
 - After each change, summarize what changed and why, and point to the key parts worth reading.
 - If the owner asks a question, answer it. A question is not a request to change code.
 - Be honest: say when you are unsure, report test failures as they are, and never claim something was verified when it was not.
@@ -135,6 +136,14 @@ These apply regardless of stack. The concrete architecture is TBD.
   - The owner is trusted (it can disable triggers), and a superuser can `SET session_replication_role = replica`.
   - Never claim triggers stop the owner.
 - **Tests that must act as the owner use `OwnerDatabase`.** Never register a second `DataSource` bean in tests, or Spring Boot would give it to the app.
+
+### API rules (ADR-0016, ADR-0017)
+- **Every new endpoint needs an explicit rule in `SecurityConfiguration`** with the scope it requires. Anything without a rule is denied by design; never replace `denyAll()` with `authenticated()`.
+- **Client-facing account lookups go through `LedgerQueries.accountOwnedBy(client, id)`.** Never load an account by id and check ownership afterwards. A non-owned account must give the same 404 as a missing one.
+- **The owning client always comes from the authenticated principal**, never from the request body or parameters.
+- **Errors are Problem Details** (`ApiExceptionHandler`), and stack traces and internal messages never reach a response.
+- **Never log API keys or put them in exception messages.** Types that hold a key secret must hide it in `toString()`.
+- **Beans that need the web server** (like the security filter chain) must be `@ConditionalOnWebApplication`, because the command-line mode runs without one. `ClientsCommandIT` runs in a non-web context to catch this.
 
 ### Ledger and payment rules for this project
 - **Writes:** only the `ledger` module writes entries and balances, and every posting goes through the posting service.

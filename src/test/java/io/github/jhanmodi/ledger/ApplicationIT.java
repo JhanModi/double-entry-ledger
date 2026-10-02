@@ -35,9 +35,11 @@ class ApplicationIT {
     }
 
     @Test
-    void actuatorEndpointsOtherThanHealthAreNotExposed() throws Exception {
-        assertThat(get("/actuator/env").statusCode()).isEqualTo(404);
-        assertThat(get("/actuator/heapdump").statusCode()).isEqualTo(404);
+    void actuatorEndpointsOtherThanHealthAreNotReachable() throws Exception {
+        // Two layers: Actuator exposes only health (application.yml), and the security rules deny everything that
+        // has no explicit rule. Without a key, the security layer answers first, with 401.
+        assertThat(get("/actuator/env").statusCode()).isEqualTo(401);
+        assertThat(get("/actuator/heapdump").statusCode()).isEqualTo(401);
     }
 
     @Test

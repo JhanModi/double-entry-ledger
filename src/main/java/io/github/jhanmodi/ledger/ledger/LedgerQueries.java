@@ -1,5 +1,6 @@
 package io.github.jhanmodi.ledger.ledger;
 
+import io.github.jhanmodi.ledger.clients.ClientId;
 import io.github.jhanmodi.ledger.money.CurrencyCode;
 import io.github.jhanmodi.ledger.money.Money;
 import java.math.BigInteger;
@@ -50,6 +51,14 @@ public class LedgerQueries {
 
     public Account account(AccountId id) {
         return accounts.find(id).orElseThrow(() -> new AccountNotFoundException(id));
+    }
+
+    /**
+     * The account, if this client owns it. Otherwise, whether it belongs to another client, is a system account, or
+     * doesn't exist, the same {@link AccountNotFoundException}, so callers can't probe for other tenants' accounts.
+     */
+    public Account accountOwnedBy(ClientId owner, AccountId id) {
+        return accounts.findOwnedBy(owner, id).orElseThrow(() -> new AccountNotFoundException(id));
     }
 
     @Transactional(readOnly = true)

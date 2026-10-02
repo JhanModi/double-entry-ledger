@@ -1,6 +1,6 @@
 # ADR-0008: `JdbcClient` with hand-written SQL
 
-- **Status:** Accepted (open question for M4, below)
+- **Status:** Accepted. The M4 open question below was resolved on 2026-10-02: **no JPA**. `JdbcClient` is used everywhere, including for `api_clients` and `api_keys`.
 - **Date:** 2026-10-01
 
 ## Context

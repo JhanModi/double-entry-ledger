@@ -117,6 +117,10 @@ These must hold at all times. The invariant checker verifies the ones that can b
 | A posting would overdraw a customer | Rejected; the whole posting rolls back | `CHECK` backstop, translated to `InsufficientFundsException` | M3a (`PostingServiceIT`, `RandomPostingsIT`) |
 | Code (or a person) writes ledger rows by hand, skipping Java's checks | Unbalanced, empty, non-positive, or wrong-currency writes are rejected; edits and deletes are rejected | Constraints and triggers in V2 | M3a (`LedgerSchemaIT`) |
 | A bug corrupts a cached balance or writes one side of a transaction | The invariant checker reports it | `InvariantChecker` | M3a (`InvariantCheckerIT`) |
+| A client tries another client's account id (IDOR) | 404, identical to an id that doesn't exist | Ownership in the SQL (`accountOwnedBy`) | M4a (`AccountsApiIT`) |
+| Someone sends a guessed, tampered, revoked, or disabled client's key | 401, the same answer for every case | `ApiKeyVerifier` (constant-time compare, no reason given) | M4a (`ApiSecurityIT`, `ApiKeyVerifierIT`) |
+| A new endpoint is added without a security rule | Unreachable, even with every scope | Deny-by-default rules | M4a (`ApiSecurityIT`) |
+| An API key leaks | Revoke it; it stops working at once. Only its hash was ever stored. | `revoked_at`; hash-only storage | M4a (`ApiKeyVerifierIT`) |
 | The app is tricked into running arbitrary SQL (e.g., injection) | It can't edit history, change account identity, disable triggers, set replica mode, alter or drop the schema, or touch migration history | Restricted login with least-privilege grants | M3b (`AppRolePrivilegesIT`) |
 | Crash after authorization, before bank submit | Sweeper submits exactly once | ADR-0010 | M9b |
 | Bank succeeds, then the call times out | Instruction UNKNOWN, hold kept, settled once | ADR-0010 | M9b |
@@ -126,7 +130,20 @@ These must hold at all times. The invariant checker verifies the ones that can b
 
 ## 8. Security
 
-API authentication arrives in M4 ([ADR-0011](adr/0011-api-key-authentication.md)). The general rules are in `CLAUDE.md`.
+The general rules are in `CLAUDE.md`.
+
+### API authentication and authorization (M4a, [ADR-0016](adr/0016-api-key-format-transport-and-bootstrap.md), [ADR-0017](adr/0017-tenant-isolation-and-error-format.md))
+
+1. **The client sends** `Authorization: Bearer dbl_<key id>_<secret>`.
+2. **`ApiKeyAuthenticationFilter` checks the key:**
+   - No header: the request carries on unauthenticated.
+   - An invalid key, or a scheme other than Bearer: 401 straight away.
+   - A valid key: the request runs as that client, with one authority per scope.
+3. **`ApiKeyVerifier` decides validity:** look up the key id, compare `SHA-256(secret)` in constant time, reject revoked keys and disabled clients. All failures look the same.
+4. **The security rules map each endpoint to a scope:** `GET /v1/accounts/**` needs `read`, and `POST /v1/accounts` needs `write`. Anything without a rule is denied, even with a valid key.
+5. **Controllers look accounts up with `accountOwnedBy(client, id)`,** so another client's account, a system account, or a missing one all give the same 404.
+
+The first client and key come from the command line (`clients create`), not an endpoint. Every error, including 401 and 403, is RFC 9457 Problem Details.
 
 ### Database trust model (M3b, [ADR-0015](adr/0015-least-privilege-database-roles.md))
 
