@@ -44,9 +44,8 @@ public class ClientsCommand implements ApplicationRunner, ExitCodeGenerator {
         try {
             String name = singleOption(args, "name");
             Set<Scope> scopes = parseScopes(singleOption(args, "scopes"));
-            ClientId client = clients.createClient(name);
-            IssuedApiKey key = clients.issueKey(client, scopes);
-            System.out.println("Created client " + client + " (" + name + ") with scopes " + scopes);
+            IssuedApiKey key = clients.createClientWithKey(name, scopes);
+            System.out.println("Created client " + key.clientId() + " (" + name + ") with scopes " + scopes);
             System.out.println("API key, shown only this once. Store it somewhere safe now:");
             System.out.println(key.plaintext());
             exitCode = 0;

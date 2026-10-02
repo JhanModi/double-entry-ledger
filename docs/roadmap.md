@@ -22,9 +22,14 @@ The proposal was approved on 2026-10-02 with these decisions:
 1. ✅ **Schema:** V5 (settlement accounts, `transfers`, `fundings`, `audit_log`, composite ownership keys, grants), schema tests, and ADR-0018 to ADR-0021.
    - `./mvnw verify` is green: 73 unit tests and 127 integration tests (37 new: `MoneyMovementSchemaIT`, `AuditLogSchemaIT`, plus additions to `LedgerSchemaIT` and `AppRolePrivilegesIT`).
    - Planted-bug check, in a scratchpad copy: a destination foreign key without the client, `SELECT` granted on `audit_log`, `purpose` dropped from the identity trigger, and the audit log's update/delete trigger removed. Each was caught by its own test.
-2. 🚧 **Audit:** the `audit` module, written in the same transaction as the action it records.
-3. ⏳ **Services:** transfers, funding, amount limits.
-4. ⏳ **HTTP:** endpoints, security rules, business errors, request ids, strict JSON, ArchUnit module rules; remove the unused `spring-boot-starter-security-test`.
+2. ✅ **Audit and request ids:**
+   - **The `audit` module:** `AuditLog.record` (`MANDATORY` propagation), `Actor` (sealed: an API key or the operator at the CLI), `AuditAction`, `RequestId`.
+   - **Audited now:** account opening (the only way to open a customer account takes a `Caller`), and client creation and key issuance from the CLI (now one transaction: `createClientWithKey`).
+   - **Request ids,** moved here from checkpoint 4 because an API-key audit row requires one: `RequestIdFilter` runs before authentication and puts the id in the MDC, the `X-Request-Id` header, and a request attribute. Each request leaves one log line (method, route template, status); that's where rejected requests like 401s are recorded.
+   - **Tests:** `./mvnw verify` is green: 78 unit tests and 139 integration tests.
+   - **Planted-bug check:** account opening not audited, `REQUIRED` instead of `MANDATORY`, `createClientWithKey` not transactional, MDC never cleared, and the client's `X-Request-Id` trusted. Each was caught.
+3. 🚧 **Services:** transfers, funding, amount limits.
+4. ⏳ **HTTP:** endpoints, security rules, business errors (with `requestId` in Problem Details), strict JSON, ArchUnit module rules; remove the unused `spring-boot-starter-security-test`.
 5. ⏳ **Docs and close:** design doc, glossary, README, primer 04, CLAUDE.md, and the end-to-end run.
 
 ### Known gaps carried forward (not failures)

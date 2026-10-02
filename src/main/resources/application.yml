@@ -15,6 +15,12 @@ spring:
     user: ${POSTGRES_USER}
     password: ${POSTGRES_PASSWORD}
 
+logging:
+  pattern:
+    # Spring Boot inserts this into its default log pattern. Every line written while serving a request starts with
+    # that request's id (ADR-0021); lines outside a request show [].
+    correlation: "[%X{requestId:-}] "
+
 management:
   endpoints:
     web:

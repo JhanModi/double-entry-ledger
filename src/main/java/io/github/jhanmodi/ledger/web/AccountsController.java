@@ -9,6 +9,7 @@ import io.github.jhanmodi.ledger.ledger.LedgerQueries;
 import io.github.jhanmodi.ledger.web.ApiJson.AccountResponse;
 import io.github.jhanmodi.ledger.web.ApiJson.EntryPageJson;
 import io.github.jhanmodi.ledger.web.ApiJson.OpenAccountRequest;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -43,9 +44,11 @@ class AccountsController {
 
     @PostMapping
     ResponseEntity<AccountResponse> open(
-            @AuthenticationPrincipal AuthenticatedClient client, @Valid @RequestBody OpenAccountRequest request) {
+            @AuthenticationPrincipal AuthenticatedClient client,
+            HttpServletRequest http,
+            @Valid @RequestBody OpenAccountRequest request) {
         // The owner always comes from the API key, never from the request body.
-        AccountId id = accounts.openCustomerAccount(client.clientId(), request.currency());
+        AccountId id = accounts.openCustomerAccount(Callers.of(client, http), request.currency());
         return ResponseEntity.created(URI.create("/v1/accounts/" + id)).body(describe(client, id));
     }
 

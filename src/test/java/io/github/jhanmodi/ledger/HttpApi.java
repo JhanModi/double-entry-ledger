@@ -4,6 +4,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.Map;
 import java.util.Optional;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
@@ -31,6 +32,12 @@ public final class HttpApi {
     }
 
     public Response send(String method, String path, String authorization, String jsonBody) {
+        return send(method, path, authorization, jsonBody, Map.of());
+    }
+
+    /** As {@link #send(String, String, String, String)}, plus any other request headers. */
+    public Response send(
+            String method, String path, String authorization, String jsonBody, Map<String, String> otherHeaders) {
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(baseUrl + path))
                 .method(
                         method,
@@ -43,6 +50,7 @@ public final class HttpApi {
         if (authorization != null) {
             request.header("Authorization", authorization);
         }
+        otherHeaders.forEach(request::header);
         try {
             HttpResponse<String> response = http.send(request.build(), HttpResponse.BodyHandlers.ofString());
             return new Response(
@@ -50,7 +58,8 @@ public final class HttpApi {
                     response.body(),
                     response.headers().firstValue("Content-Type"),
                     response.headers().firstValue("Location"),
-                    response.headers().firstValue("WWW-Authenticate"));
+                    response.headers().firstValue("WWW-Authenticate"),
+                    response.headers().firstValue("X-Request-Id"));
         } catch (Exception e) {
             throw new IllegalStateException("HTTP call failed: " + method + " " + path, e);
         }
@@ -61,7 +70,8 @@ public final class HttpApi {
             String body,
             Optional<String> contentType,
             Optional<String> location,
-            Optional<String> wwwAuthenticate) {
+            Optional<String> wwwAuthenticate,
+            Optional<String> requestId) {
 
         public JsonNode json() {
             return JsonMapper.shared().readTree(body);

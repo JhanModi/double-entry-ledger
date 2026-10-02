@@ -11,6 +11,8 @@ import io.github.jhanmodi.ledger.clients.ClientId;
 import io.github.jhanmodi.ledger.clients.ClientService;
 import io.github.jhanmodi.ledger.ledger.AccountId;
 import io.github.jhanmodi.ledger.ledger.AccountService;
+import io.github.jhanmodi.ledger.ledger.LedgerFixtures;
+import io.github.jhanmodi.ledger.ledger.PostingService;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -42,10 +44,14 @@ class MoneyMovementSchemaIT {
     AccountService accountService;
 
     @Autowired
+    PostingService postingService;
+
+    @Autowired
     ClientService clientService;
 
     JdbcClient jdbc;
     TransactionTemplate tx;
+    LedgerFixtures ledger;
 
     ClientId alice;
     ClientId bob;
@@ -59,12 +65,13 @@ class MoneyMovementSchemaIT {
     void setUp() {
         jdbc = owner.jdbc();
         tx = owner.transactions();
+        ledger = new LedgerFixtures(accountService, postingService, clientService);
         alice = clientService.createClient("alice");
         bob = clientService.createClient("bob");
-        aliceUsd = accountService.openCustomerAccount(alice, USD);
-        aliceSecondUsd = accountService.openCustomerAccount(alice, USD);
-        aliceEur = accountService.openCustomerAccount(alice, EUR);
-        bobUsd = accountService.openCustomerAccount(bob, USD);
+        aliceUsd = ledger.customer(alice, USD);
+        aliceSecondUsd = ledger.customer(alice, USD);
+        aliceEur = ledger.customer(alice, EUR);
+        bobUsd = ledger.customer(bob, USD);
         bankSettlementUsd =
                 new AccountId(jdbc.sql("SELECT id FROM accounts WHERE purpose = 'BANK_SETTLEMENT' AND currency = 'USD'")
                         .query(UUID.class)
@@ -176,7 +183,7 @@ class MoneyMovementSchemaIT {
 
     @Test
     void differentClientsMayUseTheSameIdempotencyKey() {
-        AccountId bobSecondUsd = accountService.openCustomerAccount(bob, USD);
+        AccountId bobSecondUsd = ledger.customer(bob, USD);
 
         assertAccepted(() -> {
             Map<String, Object> alices = transfer();

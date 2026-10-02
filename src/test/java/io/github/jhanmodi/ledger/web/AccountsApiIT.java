@@ -5,9 +5,11 @@ import static io.github.jhanmodi.ledger.money.CurrencyCode.USD;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.jhanmodi.ledger.HttpApi;
+import io.github.jhanmodi.ledger.OwnerDatabase;
 import io.github.jhanmodi.ledger.TestcontainersConfiguration;
 import io.github.jhanmodi.ledger.clients.ClientId;
 import io.github.jhanmodi.ledger.clients.ClientService;
+import io.github.jhanmodi.ledger.clients.IssuedApiKey;
 import io.github.jhanmodi.ledger.clients.Scope;
 import io.github.jhanmodi.ledger.ledger.AccountId;
 import io.github.jhanmodi.ledger.ledger.AccountService;
@@ -17,6 +19,7 @@ import io.github.jhanmodi.ledger.ledger.LedgerQueries;
 import io.github.jhanmodi.ledger.ledger.PostingService;
 import io.github.jhanmodi.ledger.money.Money;
 import java.util.EnumSet;
+import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -47,9 +50,13 @@ class AccountsApiIT {
     @Autowired
     LedgerQueries queries;
 
+    @Autowired
+    OwnerDatabase owner;
+
     HttpApi api;
     LedgerFixtures ledger;
     ClientId alice;
+    IssuedApiKey alicesIssuedKey;
     String aliceKey;
     String bobKey;
 
@@ -58,8 +65,8 @@ class AccountsApiIT {
         api = new HttpApi(port);
         ledger = new LedgerFixtures(accountService, postingService, clients);
         alice = clients.createClient("Alice's business");
-        aliceKey = bearer(
-                clients.issueKey(alice, EnumSet.of(Scope.READ, Scope.WRITE)).plaintext());
+        alicesIssuedKey = clients.issueKey(alice, EnumSet.of(Scope.READ, Scope.WRITE));
+        aliceKey = bearer(alicesIssuedKey.plaintext());
         bobKey = bearer(clients.issueKey(clients.createClient("Bob's business"), EnumSet.of(Scope.READ, Scope.WRITE))
                 .plaintext());
     }
@@ -79,6 +86,30 @@ class AccountsApiIT {
         assertThat(queries.accountOwnedBy(alice, new AccountId(UUID.fromString(id))))
                 .as("owned by Alice")
                 .isNotNull();
+    }
+
+    @Test
+    void openingAnAccountIsAuditedWithTheKeyAndTheRequestItCameIn() {
+        HttpApi.Response response = api.post("/v1/accounts", aliceKey, "{\"currency\": \"USD\"}");
+        String id = response.json().get("id").asString();
+
+        Map<String, Object> audit =
+                owner.jdbc().sql("""
+                        SELECT action, actor_type, actor_client_id, actor_key_id, request_id::text AS request_id,
+                               host(source_ip) AS source_ip
+                        FROM audit_log
+                        WHERE target_id = :id
+                        """).param("id", id).query().singleRow();
+
+        assertThat(audit)
+                .containsEntry("action", "ACCOUNT_OPENED")
+                .containsEntry("actor_type", "API_KEY")
+                .containsEntry("actor_client_id", alice.value())
+                .containsEntry("actor_key_id", alicesIssuedKey.keyId())
+                // The same id the client got back in the X-Request-Id header: the link between its report and this row.
+                .containsEntry("request_id", response.requestId().orElseThrow());
+        // The test client connects over loopback, as IPv4 or IPv6 depending on how "localhost" resolves.
+        assertThat(audit.get("source_ip")).isIn("127.0.0.1", "::1");
     }
 
     @Test
