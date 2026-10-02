@@ -16,6 +16,7 @@ An ADR records one significant decision: the context, the options considered, wh
 | [0010](0010-in-process-mock-bank-and-recovery.md) | In-process mock bank and payment recovery | Accepted |
 | [0011](0011-api-key-authentication.md) | API-key authentication with scopes | Accepted |
 | [0012](0012-maven.md) | Maven as the build tool | Accepted |
+| [0013](0013-currencies-as-a-java-enum.md) | Currencies as a Java enum, mirrored by the `currencies` table | Accepted |
 
 ## Template
 

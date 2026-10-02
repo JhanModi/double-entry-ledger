@@ -9,10 +9,10 @@ import org.testcontainers.utility.DockerImageName;
 /**
  * Starts a real Postgres in Docker for integration tests. {@code @ServiceConnection} points the app's datasource at
  * the container, overriding the URL and credentials in application.yml. Spring caches the test context, so tests
- * that import this configuration share one container.
+ * that import this configuration share one container. Public so integration tests in module subpackages can import it.
  */
 @TestConfiguration(proxyBeanMethods = false)
-class TestcontainersConfiguration {
+public class TestcontainersConfiguration {
 
     @Bean
     @ServiceConnection

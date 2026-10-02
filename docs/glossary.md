@@ -26,6 +26,16 @@ The terms used in code, docs, and the API. Use them consistently, and add to thi
 - **Derived balance.** A balance computed directly from entries. The cached balance must always equal it.
 - **Invariant.** A rule that must always be true, e.g., "every ledger transaction balances". The **invariant checker** verifies these against the database.
 
+## Money
+
+- **Value object.** An object defined only by its values, never changed after creation. Two `Money` values with the same amount and currency are equal. `Money` is one.
+- **Exponent.** The number of decimal places in a currency's minor unit (ISO 4217): USD 2, JPY 0, KWD 3.
+- **Rounding mode.** The rule for rounding a value that falls between two whole minor units. **HALF_EVEN** ("banker's rounding") sends ties to the even neighbour (2.5 → 2, 3.5 → 4), so over many operations it doesn't drift up or down. **HALF_UP** sends ties away from zero (2.5 → 3, −2.5 → −3).
+- **Allocation.** Splitting an amount into parts by ratios (fees, installments, splits) so the parts add up to exactly the original, with no minor unit lost or created.
+- **Largest remainder method.** The allocation rule used here. Round every share down, then give the leftover minor units to the parts that lost the most in the rounding.
+- **Property-based test.** A test that states a rule that must hold for *every* input (e.g., "parts add up to the original"). The library generates hundreds of inputs to try to break it.
+- **Shrinking.** After a property-based test fails, the library reduces the failing input to the smallest one that still fails (e.g., "1 cent split 1:1"), which makes the bug easy to see.
+
 ## Payments
 
 - **Transfer.** An instant movement between two customer accounts inside the ledger. One database transaction.

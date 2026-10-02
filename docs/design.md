@@ -125,6 +125,66 @@ Strategy: unit, property-based, integration against real Postgres, concurrency, 
 - **Current coverage** (`ApplicationIT`): the health endpoint is UP; Actuator endpoints other than `health` return 404; Flyway created and seeded `currencies`.
 - **CI** (`.github/workflows/ci.yml`): `./mvnw verify` on Temurin 25, plus a gitleaks scan of the full git history.
 
-## 10. Operations
+## 10. Money rules (M2)
+
+Implemented in `io.github.jhanmodi.ledger.money` ([ADR-0002](adr/0002-money-as-integer-minor-units.md), [ADR-0013](adr/0013-currencies-as-a-java-enum.md)). Every example below is a test in `MoneyTest` or `MoneyAllocationTest`. The general rules are checked by property tests (`MoneyPropertiesTest`, `MoneyAllocationPropertiesTest`).
+
+**Representation:** `Money(long minorUnits, CurrencyCode currency)`, immutable. Exponents: USD 2, EUR 2, JPY 0, KWD 3. Negative amounts are allowed (balance changes, system accounts). The rule that entry amounts are positive belongs to entries (M3).
+
+### Arithmetic
+
+| Operation | Result |
+|---|---|
+| 10.50 USD + 0.75 USD | 11.25 USD |
+| 10.50 USD − 0.75 USD | 9.75 USD |
+| USD + EUR (also −, compare) | `CurrencyMismatchException` |
+| `Long.MAX_VALUE` + 1 minor unit | `ArithmeticException`. It never wraps around. |
+
+Display, for logs and test output only: `1050 USD` → `10.50 USD`, `1000 JPY` → `1000 JPY`, `1234 KWD` → `1.234 KWD`, `−5 USD` → `-0.05 USD`.
+
+### Rounding
+
+Only `multiply(factor, roundingMode)` rounds. It always rounds to a whole minor unit, using the mode the caller names. There is no default.
+
+| Calculation | HALF_EVEN | HALF_UP |
+|---|---|---|
+| 25¢ × 0.1 = 2.5¢ | 2¢ | 3¢ |
+| 35¢ × 0.1 = 3.5¢ | 4¢ | 4¢ |
+| −25¢ × 0.1 = −2.5¢ | −2¢ | −3¢ (Java's HALF_UP rounds ties away from zero) |
+| ¥1001 × 0.5 = ¥500.5 | ¥500 | |
+
+`UNNECESSARY` throws if the result isn't already a whole minor unit. Results that don't fit in a `long` throw.
+
+### Allocation (largest remainder)
+
+`allocate(ratios...)` splits an amount into one part per ratio:
+1. Each part starts as its exact share (amount × ratio ÷ total of ratios), rounded down.
+2. The leftover minor units go one at a time to the parts that lost the most to that rounding down. Ties go to the earlier part.
+3. The parts always add up to exactly the original amount.
+
+| Amount and ratios | Parts | Why |
+|---|---|---|
+| $100.00 in 1:1:1 | 33.34, 33.33, 33.33 | Three-way tie, so the earliest part gets the cent |
+| $0.05 in 1:1 | 0.03, 0.02 | |
+| $0.01 in 1:99 | 0.00, 0.01 | The 99 part lost 0.99¢ to rounding down, the 1 part only 0.01¢ |
+| $1.00 in 1:2:4 | 0.14, 0.29, 0.57 | The second part lost the most (0.57¢). Leftover-to-first would give 0.15, 0.28, 0.57. |
+| $0.05 in 1:1:1 | 0.02, 0.02, 0.01 | Two leftover cents, handed out one at a time |
+| ¥100 in 1:0:1 | 50, 0, 50 | A zero ratio gets nothing |
+| 1.000 KWD in 1:1:1 | 0.334, 0.333, 0.333 | Works in fils (3 decimals) |
+| `Long.MAX_VALUE` in 2:1 | 6148914691236517205, 3074457345618258602 | Works across the whole range |
+
+**Errors:**
+- No ratios, a negative ratio, all ratios zero, or a negative amount: `IllegalArgumentException`.
+- Ratios that add up to more than `Long.MAX_VALUE`: `ArithmeticException`.
+
+**Properties** (checked across generated inputs):
+- Parts add up to the original.
+- There's one part per ratio, all in the same currency.
+- Each part is within one minor unit of its exact share.
+- A zero ratio gets zero.
+- A larger ratio never gets a smaller part.
+- The same input always gives the same parts.
+
+## 11. Operations
 
 *Filled in from M11 and M14:* reconciliation, metrics, dashboards, and runbooks (e.g., resolving NEEDS_REVIEW).

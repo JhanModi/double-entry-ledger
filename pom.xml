@@ -36,6 +36,8 @@
         <java.version>25</java.version>
         <spotless.version>3.10.3</spotless.version>
         <palantir-java-format.version>2.101.0</palantir-java-format.version>
+        <jqwik.version>1.10.1</jqwik.version>
+        <archunit.version>1.5.1</archunit.version>
     </properties>
 
     <dependencies>
@@ -100,6 +102,20 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>testcontainers-postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Property-based testing: generates hundreds of inputs and shrinks failures to the smallest example. -->
+        <dependency>
+            <groupId>net.jqwik</groupId>
+            <artifactId>jqwik</artifactId>
+            <version>${jqwik.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- Architecture rules checked as unit tests, e.g. no floating point in main code (ADR-0002). -->
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit</artifactId>
+            <version>${archunit.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

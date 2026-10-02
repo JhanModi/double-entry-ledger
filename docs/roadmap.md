@@ -9,8 +9,8 @@ Status: ✅ done · 🔍 in review · ⏳ not started
 | | Milestone | Scope |
 |---|---|---|
 | ✅ | **M0 Decisions & repo** | git init, `.gitignore`, `.env.example`; CLAUDE.md decisions; ADRs 0001–0012; design doc skeleton, glossary, roadmap, primer. No app code. |
-| 🔍 | **M1 Walking skeleton** | Maven project, Docker Compose (Postgres), Flyway baseline, Actuator health check, one Testcontainers test, GitHub Actions CI, Dependabot, Spotless. Implemented; awaiting review and a green CI run. |
-| ⏳ | **M2 Money** | `Money`/currency types, overflow-safe arithmetic, allocation, rounding; unit and property tests; ArchUnit "no floats" rule. |
+| ✅ | **M1 Walking skeleton** | Maven project, Docker Compose (Postgres), Flyway baseline, Actuator health check, one Testcontainers test, GitHub Actions CI, Dependabot, Spotless. |
+| 🔍 | **M2 Money** | `Money`/currency types, overflow-safe arithmetic, allocation, rounding; unit and property tests; ArchUnit "no floats" rule. Implemented; `allocate()` was written by the owner. Awaiting CI and teach-back. |
 | ⏳ | **M3 Ledger core** | Schema, constraints, triggers, append-only DB roles; posting service; balance and history reads. |
 | ⏳ | **M4 Transfers API + auth** | API-key filter, scopes, tenant isolation, customer vs. system accounts, admin funding, Problem Details, OpenAPI, audit log. Open question: JPA for non-ledger tables. |
 | ⏳ | **M5 Concurrency** | Ordered locking, `lock_timeout`, retries, backstop constraint, invariant checker; 1,000-request and deadlock tests. |

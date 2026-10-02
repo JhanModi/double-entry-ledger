@@ -9,7 +9,7 @@ Guidance for Claude Code in this repository. Read all of it before doing any wor
 - **The owner's goal:** to understand every engineering decision and be able to defend it in an interview. Claude acts as a senior software architect and mentor, not a code generator.
 - **Project name:** `double-entry-ledger`.
 - **Product:** a double-entry ledger and payments API (backend only). API clients are businesses. They hold customer accounts, move money between them with instant transfers, and send or receive payments through a simulated bank. Every movement is a balanced, append-only posting, and balances can be proven correct.
-- **Status (2026-10-02):** M1 (walking skeleton) is implemented and awaiting the owner's review. No ledger features exist yet.
+- **Status (2026-10-02):** M2 (Money) is implemented. The owner wrote `Money.allocate()`, and `./mvnw verify` passes. Still needed to close M2: CI green after the owner pushes, and the owner's teach-back answers.
 
 ### Where things are
 - `docs/roadmap.md`: milestones, their status, and decisions still open. **Check it at the start of every session.**
@@ -38,6 +38,8 @@ Maven versions live in `pom.xml`, and Dependabot proposes Maven and GitHub Actio
 - `./mvnw verify` (`.\mvnw verify` in PowerShell): compile, unit tests, integration tests, and format check. This is exactly what CI runs. **Docker must be running.**
 - `./mvnw test`: unit tests only. Fast, no Docker needed.
 - `./mvnw spotless:apply`: fix formatting.
+- `./mvnw test "-Dtest=MoneyAllocation*"`: run only matching test classes (quoted so PowerShell passes it through intact).
+  - **Gotcha:** `-Dtest` *replaces* Surefire's `*Test` pattern, so an exclusion like `"-Dtest=!Foo*"` also makes Surefire run the `*IT` classes.
 - `docker compose up -d`, then `./mvnw spring-boot:run`: local database and app. Health check at `http://localhost:8080/actuator/health`.
 
 ### Still open (tracked in `docs/roadmap.md`; don't assume answers)
