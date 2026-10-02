@@ -41,7 +41,7 @@ API client ──HTTPS + API key──▶ ┌───────────�
 | Module | Owns | Milestone |
 |---|---|---|
 | `money` | `Money`, currencies, rounding, allocation | M2 |
-| `ledger` | accounts, ledger transactions, entries, balances, invariant checker | M3, M5 |
+| `ledger` | accounts, ledger transactions, entries, balances, invariant checker | M3a, M3b, M5 |
 | `clients` | API clients, API keys, scopes | M4 |
 | `transfers` | instant internal transfers | M4 |
 | `idempotency` | idempotency keys | M6 |
@@ -53,7 +53,16 @@ API client ──HTTPS + API key──▶ ┌───────────�
 
 ## 4. Data model
 
-*Filled in from M3.* Schema overview and constraints: see the decisions in [ADR-0003](adr/0003-entry-direction-and-positive-amount.md), [ADR-0004](adr/0004-balances-as-cached-projection.md), and [ADR-0006](adr/0006-holds-table.md).
+Since M3a. Migration: `V2__create_ledger.sql`. Decisions: [ADR-0003](adr/0003-entry-direction-and-positive-amount.md), [ADR-0004](adr/0004-balances-as-cached-projection.md), [ADR-0014](adr/0014-uuidv7-ids.md).
+
+| Table | Holds | Key rules (enforced by the database) |
+|---|---|---|
+| `currencies` | Supported currencies and exponents | Mirrors the `CurrencyCode` enum (ADR-0013) |
+| `accounts` | What each account is, plus cached balances for customers | `normal_side` matches `type`; customers are liabilities; only customers have cached balances; available ≥ 0; identity columns never change; never deleted |
+| `ledger_transactions` | One row per posting: type, description, business date | At least 2 entries, and balanced per currency, checked at commit; append-only |
+| `entries` | One row per line: account, direction, positive amount | `amount > 0`; currency must match the account's (composite FK); append-only |
+
+All ids are UUIDv7. Customer `posted_balance` is a cache of the entries, updated in the same transaction by SQL delta. System accounts have NULL balance columns, and their balance is derived from entries.
 
 ## 5. Key flows
 
@@ -104,7 +113,10 @@ These must hold at all times. The invariant checker verifies the ones that can b
 | Client retries after a timeout | Money moves once; the stored response is replayed | ADR-0007 | M6 |
 | Two withdrawals race on one account | At most the available funds are spent | ADR-0005 | M5 |
 | Opposite transfers A→B and B→A at once | No deadlock | ADR-0005 (lock order) | M5 |
-| Server crashes mid-transfer | Transaction rolls back; nothing half-applied | Single DB transaction | M3/M5 |
+| Server crashes mid-transfer | Transaction rolls back; nothing half-applied | Single DB transaction | M3a (`PostingServiceIT`: a failed posting leaves no entries) |
+| A posting would overdraw a customer | Rejected; the whole posting rolls back | `CHECK` backstop, translated to `InsufficientFundsException` | M3a (`PostingServiceIT`, `RandomPostingsIT`) |
+| Code (or a person) writes ledger rows by hand, skipping Java's checks | Unbalanced, empty, non-positive, or wrong-currency writes are rejected; edits and deletes are rejected | Constraints and triggers in V2 | M3a (`LedgerSchemaIT`) |
+| A bug corrupts a cached balance or writes one side of a transaction | The invariant checker reports it | `InvariantChecker` | M3a (`InvariantCheckerIT`) |
 | Crash after authorization, before bank submit | Sweeper submits exactly once | ADR-0010 | M9b |
 | Bank succeeds, then the call times out | Instruction UNKNOWN, hold kept, settled once | ADR-0010 | M9b |
 | Duplicate bank callback / settle–void race | One terminal state | Conditional transitions | M9b |

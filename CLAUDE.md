@@ -9,7 +9,7 @@ Guidance for Claude Code in this repository. Read all of it before doing any wor
 - **The owner's goal:** to understand every engineering decision and be able to defend it in an interview. Claude acts as a senior software architect and mentor, not a code generator.
 - **Project name:** `double-entry-ledger`.
 - **Product:** a double-entry ledger and payments API (backend only). API clients are businesses. They hold customer accounts, move money between them with instant transfers, and send or receive payments through a simulated bank. Every movement is a balanced, append-only posting, and balances can be proven correct.
-- **Status (2026-10-02):** M2 (Money) is implemented. The owner wrote `Money.allocate()`, and `./mvnw verify` passes. Still needed to close M2: CI green after the owner pushes, and the owner's teach-back answers.
+- **Status (2026-10-02):** M3 is split into M3a (schema and posting) and M3b (least-privilege database roles). M3a is implemented, and `./mvnw verify` passes. At the owner's request, Claude wrote the invariant checker's SQL (the planned owner exercise) and walked through it. Still needed to close M3a: CI green and the owner's teach-back answers.
 
 ### Where things are
 - `docs/roadmap.md`: milestones, their status, and decisions still open. **Check it at the start of every session.**
@@ -164,6 +164,10 @@ These apply regardless of stack. The concrete architecture is TBD.
 - **Naming:**
   - `*Test` classes are unit tests. They need no Docker and are run by Surefire in `./mvnw test`.
   - `*IT` classes are integration tests. They are run by Failsafe in `./mvnw verify` and use Testcontainers through `@Import(TestcontainersConfiguration.class)`.
+- **Integration tests share one database, and ledger data is append-only, so it can't be cleaned up:**
+  - Each test creates its own accounts (see `LedgerFixtures`) and never asserts on global counts.
+  - Raw SQL in tests may only *commit* balanced transactions on system accounts. Anything else must run rollback-only, or the global invariant checker will (rightly) fail.
+  - A test that needs an empty ledger uses `@DirtiesContext(classMode = BEFORE_CLASS)` for a fresh container, plus `@Transactional` to roll each test back (see `InvariantCheckerIT`).
 - Test layers:
   - **Unit:** domain and money logic. Fast, pure, and exhaustive.
   - **Integration:** against a real database, not mocks, so transactions, constraints, and migrations are actually exercised.

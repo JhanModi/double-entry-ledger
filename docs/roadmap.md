@@ -10,10 +10,11 @@ Status: ✅ done · 🔍 in review · ⏳ not started
 |---|---|---|
 | ✅ | **M0 Decisions & repo** | git init, `.gitignore`, `.env.example`; CLAUDE.md decisions; ADRs 0001–0012; design doc skeleton, glossary, roadmap, primer. No app code. |
 | ✅ | **M1 Walking skeleton** | Maven project, Docker Compose (Postgres), Flyway baseline, Actuator health check, one Testcontainers test, GitHub Actions CI, Dependabot, Spotless. |
-| 🔍 | **M2 Money** | `Money`/currency types, overflow-safe arithmetic, allocation, rounding; unit and property tests; ArchUnit "no floats" rule. Implemented; `allocate()` was written by the owner. Awaiting CI and teach-back. |
-| ⏳ | **M3 Ledger core** | Schema, constraints, triggers, append-only DB roles; posting service; balance and history reads. |
+| ✅ | **M2 Money** | `Money`/currency types, overflow-safe arithmetic, allocation (`allocate()` written by the owner), rounding; unit and property tests; ArchUnit "no floats" rule. |
+| 🔍 | **M3a Ledger schema & posting** | Accounts, ledger transactions, entries; DB guards (constraints, deferred balance triggers, append-only triggers); posting service; balance and history reads; invariant checker. Implemented; awaiting CI and teach-back. |
+| ⏳ | **M3b Least-privilege DB roles** | `ledger_app` group role with column-level grants; the app connects as a restricted login and Flyway as the owner, in local runs and tests. |
 | ⏳ | **M4 Transfers API + auth** | API-key filter, scopes, tenant isolation, customer vs. system accounts, admin funding, Problem Details, OpenAPI, audit log. Open question: JPA for non-ledger tables. |
-| ⏳ | **M5 Concurrency** | Ordered locking, `lock_timeout`, retries, backstop constraint, invariant checker; 1,000-request and deadlock tests. |
+| ⏳ | **M5 Concurrency** | Ordered locking, `lock_timeout`, retries; 1,000-request and deadlock tests, with the invariant checker (built in M3a) run under concurrency. |
 | ⏳ | **M6 Idempotency** | Claim/replay in the same transaction, request hashing, expiry cleanup; same-key concurrency tests. |
 | ⏳ | **M7 Resume checkpoint** | README, short design doc, architecture diagram v1, demo script; gitleaks history scan, license; repo made public (owner's call). Described as a *ledger and transfers API*. |
 | ⏳ | **M8 Reversals** | Admin reversal, `UNIQUE(reverses_txn_id)`, negative-balance policy. |

@@ -56,6 +56,15 @@ The terms used in code, docs, and the API. Use them consistently, and add to thi
 - **Dual write.** Writing to two systems (e.g., database and broker) without a shared transaction. One can succeed while the other fails.
 - **Reconciliation.** Comparing our ledger against an external record (the bank statement) and flagging differences. It never auto-corrects.
 
+## Database
+
+- **Constraint.** A rule the database enforces on every write, e.g. `CHECK (amount > 0)`, whichever program does the writing.
+- **Constraint trigger (deferred).** A trigger whose check waits until `COMMIT`. Used for "a transaction's debits equal its credits," which is only true once every entry is in.
+- **Append-only.** Rows can be inserted but never updated or deleted. Corrections are new rows.
+- **Keyset pagination.** Paging by "rows after the last one I saw" (a cursor) instead of `OFFSET`. Costs the same on every page, and new rows don't shift earlier pages.
+- **UUIDv7.** A UUID that starts with a timestamp, so new ids sort in creation order (ADR-0014).
+- **REPEATABLE READ.** An isolation level where every query in a transaction sees the same snapshot of the database.
+
 ## Platform
 
 - **API client.** A business that uses the API (a tenant). It owns customer accounts and API keys.
