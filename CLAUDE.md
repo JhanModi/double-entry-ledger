@@ -9,7 +9,7 @@ Guidance for Claude Code in this repository. Read all of it before doing any wor
 - **The owner's goal:** to understand every engineering decision and be able to defend it in an interview. Claude acts as a senior software architect and mentor, not a code generator.
 - **Project name:** `double-entry-ledger`.
 - **Product:** a double-entry ledger and payments API (backend only). API clients are businesses. They hold customer accounts, move money between them with instant transfers, and send or receive payments through a simulated bank. Every movement is a balanced, append-only posting, and balances can be proven correct.
-- **Status (2026-10-02):** M3 is split into M3a (schema and posting) and M3b (least-privilege database roles). M3a is implemented, and `./mvnw verify` passes. At the owner's request, Claude wrote the invariant checker's SQL (the planned owner exercise) and walked through it. Still needed to close M3a: CI green and the owner's teach-back answers.
+- **Status (2026-10-02):** M3b (least-privilege database roles) is implemented. The owner wrote V3's GRANT statements. `./mvnw verify` passes, and locally the app connects as `ledger_service` while Flyway ran as the owner. Still needed to close M3b: CI green and the owner's teach-back answers.
 
 ### Where things are
 - `docs/roadmap.md`: milestones, their status, and decisions still open. **Check it at the start of every session.**
@@ -125,6 +125,16 @@ These apply regardless of stack. The concrete architecture is TBD.
 - Store times in UTC with timezone information. Keep the event timestamp separate from the business/posting date. Never derive business dates from the server's local time.
 - Every money movement can be traced: who started it, when, why, which request, and its external reference IDs (needed for reconciliation).
 - Every calculation rule (fees, interest, FX, limits) has a written spec with worked examples, and tests that encode those examples.
+
+### Database roles (ADR-0015)
+- **The app connects as the restricted `ledger_service` login**, a member of the `ledger_app` group role. Flyway connects as the owner. Tests mirror this through `TestcontainersConfiguration`.
+- **Every migration that adds a table must also `GRANT` its privileges to `ledger_app`**, and update the expected inventory in `AppRolePrivilegesIT`. Grant only what the app needs; prefer column-level `UPDATE`.
+- **Describe the trust model accurately:**
+  - Constraints and triggers catch *mistakes* by any role.
+  - Privileges stop the *app*.
+  - The owner is trusted (it can disable triggers), and a superuser can `SET session_replication_role = replica`.
+  - Never claim triggers stop the owner.
+- **Tests that must act as the owner use `OwnerDatabase`.** Never register a second `DataSource` bean in tests, or Spring Boot would give it to the app.
 
 ### Ledger and payment rules for this project
 - **Writes:** only the `ledger` module writes entries and balances, and every posting goes through the posting service.

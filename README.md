@@ -22,6 +22,7 @@ Maven doesn't need to be installed: the Maven Wrapper (`mvnw`) downloads the pin
    ```bash
    docker compose up -d
    ```
+   On its first start (an empty data volume), Postgres runs `docker/postgres/initdb/`. That creates the restricted login the app connects as, from `APP_DB_USER` and `APP_DB_PASSWORD` in `.env`. Flyway migrations run as the owner. If you set up your database before these roles existed, reset it once with `docker compose down -v`, which **deletes all local data**.
 3. Start the app. Flyway applies database migrations on startup.
    ```bash
    ./mvnw spring-boot:run

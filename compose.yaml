@@ -9,12 +9,18 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # Read by the init script below to create the app's restricted login (ADR-0015).
+      APP_DB_USER: ${APP_DB_USER:?set APP_DB_USER in .env}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}
     ports:
       # Bound to 127.0.0.1 so the database is reachable only from this machine, not the local network.
       - "127.0.0.1:${DB_PORT:-5432}:5432"
     volumes:
       # Postgres 18 images keep data under /var/lib/postgresql (older images used /var/lib/postgresql/data).
       - postgres-data:/var/lib/postgresql
+      # Scripts here run only when the data volume is first created. After changing them, reset with
+      # `docker compose down -v`, which deletes all local data.
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s

@@ -64,6 +64,11 @@ The terms used in code, docs, and the API. Use them consistently, and add to thi
 - **Keyset pagination.** Paging by "rows after the last one I saw" (a cursor) instead of `OFFSET`. Costs the same on every page, and new rows don't shift earlier pages.
 - **UUIDv7.** A UUID that starts with a timestamp, so new ids sort in creation order (ADR-0014).
 - **REPEATABLE READ.** An isolation level where every query in a transaction sees the same snapshot of the database.
+- **Role.** A Postgres user or group. A *login role* can connect; a *group role* (NOLOGIN) holds privileges that its members inherit.
+- **Least privilege.** Giving each component exactly the access it needs and nothing more. The app's login can read and insert ledger rows and update three account columns (ADR-0015).
+- **Owner.** The role that created a table. It can do anything to that table, including disabling its triggers, so it's trusted and used for migrations only.
+- **Superuser.** A role that skips every privilege check. Never what the application connects as.
+- **`session_replication_role = replica`.** A superuser-only setting that stops ordinary triggers firing, used for replication and restores. One reason triggers protect against mistakes rather than against superusers.
 
 ## Platform
 

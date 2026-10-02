@@ -6,8 +6,13 @@ spring:
     import: optional:file:.env[.properties]
   datasource:
     url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${POSTGRES_DB}
-    # Until M3 the app connects as the owner role. The restricted app role arrives with the append-only tables.
-    username: ${POSTGRES_USER}
+    # The app connects as a restricted login that can't modify ledger history, disable triggers, or change the
+    # schema (ADR-0015).
+    username: ${APP_DB_USER}
+    password: ${APP_DB_PASSWORD}
+  flyway:
+    # Migrations run as the owner, on a separate connection from the app's (same URL, different login).
+    user: ${POSTGRES_USER}
     password: ${POSTGRES_PASSWORD}
 
 management:

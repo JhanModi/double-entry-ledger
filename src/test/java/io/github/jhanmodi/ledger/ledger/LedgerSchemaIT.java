@@ -5,6 +5,7 @@ import static io.github.jhanmodi.ledger.money.CurrencyCode.USD;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.github.jhanmodi.ledger.OwnerDatabase;
 import io.github.jhanmodi.ledger.TestcontainersConfiguration;
 import io.github.jhanmodi.ledger.money.CurrencyCode;
 import io.github.jhanmodi.ledger.money.Money;
@@ -18,11 +19,15 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Proves each database guard in V2__create_ledger.sql works on its own, by going around the Java code with raw SQL.
+ *
+ * <p>The raw SQL runs as the database <em>owner</em>, the most privileged role there is, to show that the constraints
+ * and triggers catch mistakes made by any role: a bug, a hand-written fix, a wrong migration. They aren't a defense
+ * against a malicious owner, who could disable triggers or drop constraints. That's why the owner is used for
+ * migrations only, and the application connects as a restricted login instead (ADR-0015, AppRolePrivilegesIT).
  *
  * <p>Raw SQL here only ever commits balanced transactions on system accounts. Anything else would leave the shared
  * test database in a state the invariant checker would rightly complain about. Tests that expect a failure run
@@ -33,10 +38,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 class LedgerSchemaIT {
 
     @Autowired
-    JdbcClient jdbc;
-
-    @Autowired
-    PlatformTransactionManager transactionManager;
+    OwnerDatabase owner;
 
     @Autowired
     AccountService accountService;
@@ -44,12 +46,14 @@ class LedgerSchemaIT {
     @Autowired
     PostingService postingService;
 
+    JdbcClient jdbc;
     TransactionTemplate tx;
     LedgerFixtures ledger;
 
     @BeforeEach
     void setUp() {
-        tx = new TransactionTemplate(transactionManager);
+        jdbc = owner.jdbc();
+        tx = owner.transactions();
         ledger = new LedgerFixtures(accountService, postingService);
     }
 

@@ -117,6 +117,7 @@ These must hold at all times. The invariant checker verifies the ones that can b
 | A posting would overdraw a customer | Rejected; the whole posting rolls back | `CHECK` backstop, translated to `InsufficientFundsException` | M3a (`PostingServiceIT`, `RandomPostingsIT`) |
 | Code (or a person) writes ledger rows by hand, skipping Java's checks | Unbalanced, empty, non-positive, or wrong-currency writes are rejected; edits and deletes are rejected | Constraints and triggers in V2 | M3a (`LedgerSchemaIT`) |
 | A bug corrupts a cached balance or writes one side of a transaction | The invariant checker reports it | `InvariantChecker` | M3a (`InvariantCheckerIT`) |
+| The app is tricked into running arbitrary SQL (e.g., injection) | It can't edit history, change account identity, disable triggers, set replica mode, alter or drop the schema, or touch migration history | Restricted login with least-privilege grants | M3b (`AppRolePrivilegesIT`) |
 | Crash after authorization, before bank submit | Sweeper submits exactly once | ADR-0010 | M9b |
 | Bank succeeds, then the call times out | Instruction UNKNOWN, hold kept, settled once | ADR-0010 | M9b |
 | Duplicate bank callback / settle–void race | One terminal state | Conditional transitions | M9b |
@@ -125,7 +126,17 @@ These must hold at all times. The invariant checker verifies the ones that can b
 
 ## 8. Security
 
-*Filled in from M4.* See [ADR-0011](adr/0011-api-key-authentication.md) and the security rules in `CLAUDE.md`.
+API authentication arrives in M4 ([ADR-0011](adr/0011-api-key-authentication.md)). The general rules are in `CLAUDE.md`.
+
+### Database trust model (M3b, [ADR-0015](adr/0015-least-privilege-database-roles.md))
+
+| Layer | Protects against | Doesn't protect against |
+|---|---|---|
+| Constraints and triggers (V2) | *Mistakes* by any role: bugs, hand-written fixes, wrong migrations | A malicious owner (who can disable triggers or drop constraints) or superuser (who can `SET session_replication_role = replica`) |
+| Privileges (V3) | The *application*, and anything that compromises its connection, such as SQL injection. It can't edit history, change account identity, disable triggers, alter the schema, or touch migration history. | The owner |
+| The owner | Nothing: it's trusted, and used for migrations only | |
+
+**Known gap:** Flyway runs at application startup, so the app *process* holds the owner's credentials. SQL injection through the app's connection is contained. Code execution inside the app process isn't. Running migrations as a separate deployment step closes this (M16).
 
 ## 9. Testing
 
