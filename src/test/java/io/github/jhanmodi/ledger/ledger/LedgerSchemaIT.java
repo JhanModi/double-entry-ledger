@@ -11,6 +11,7 @@ import io.github.jhanmodi.ledger.clients.ClientService;
 import io.github.jhanmodi.ledger.money.CurrencyCode;
 import io.github.jhanmodi.ledger.money.Money;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -187,7 +188,8 @@ class LedgerSchemaIT {
                 "type = 'EQUITY'",
                 "created_at = now() - interval '1 day'",
                 "client_id = '" + anotherClient + "'",
-                "client_id = NULL")) {
+                "client_id = NULL",
+                "purpose = 'BANK_SETTLEMENT'")) {
             assertThatThrownBy(() -> rollbackOnly(() -> jdbc.sql("UPDATE accounts SET " + change + " WHERE id = :id")
                             .param("id", customer.value())
                             .update()))
@@ -271,6 +273,61 @@ class LedgerSchemaIT {
                 .hasMessageContaining("accounts_available_balance_non_negative");
     }
 
+    // --- System accounts with a purpose (V5, ADR-0018) ---
+
+    @Test
+    void everyCurrencyHasExactlyOneBankSettlementAccount() {
+        // A migration that adds a currency must add its settlement account too. This is what catches one that doesn't.
+        List<String> settlementCurrencies = jdbc.sql("""
+                        SELECT currency FROM accounts
+                        WHERE purpose = 'BANK_SETTLEMENT' AND kind = 'SYSTEM' AND type = 'ASSET'
+                        """).query(String.class).list();
+
+        assertThat(settlementCurrencies)
+                .containsExactlyInAnyOrderElementsOf(
+                        Arrays.stream(CurrencyCode.values()).map(Enum::name).toList());
+    }
+
+    @Test
+    void aCurrencyCannotHaveASecondAccountWithTheSamePurpose() {
+        assertThatThrownBy(() -> rollbackOnly(() -> insertSystemAccount("ASSET", "DEBIT", "USD", "BANK_SETTLEMENT")))
+                .rootCause()
+                .hasMessageContaining("accounts_purpose_currency_key");
+    }
+
+    @Test
+    void aBankSettlementAccountMustBeAnAsset() {
+        assertThatThrownBy(
+                        () -> rollbackOnly(() -> insertSystemAccount("LIABILITY", "CREDIT", "USD", "BANK_SETTLEMENT")))
+                .rootCause()
+                .hasMessageContaining("accounts_bank_settlement_is_asset");
+    }
+
+    @Test
+    void anUnknownPurposeIsRejected() {
+        assertThatThrownBy(() -> rollbackOnly(() -> insertSystemAccount("REVENUE", "CREDIT", "USD", "FEES")))
+                .rootCause()
+                .hasMessageContaining("accounts_purpose_known");
+    }
+
+    @Test
+    void aCustomerAccountCannotHaveAPurpose() {
+        UUID owner = ledger.client().value();
+
+        // Two rules reject this today: only system accounts have a purpose, and a bank-settlement account must be an
+        // asset while a customer account is a liability. Either may be the one reported. The system-only rule is the
+        // one that will matter once a purpose exists that a liability could have.
+        assertThatThrownBy(() -> rollbackOnly(
+                        () -> jdbc.sql("""
+                                INSERT INTO accounts
+                                    (kind, type, normal_side, currency, posted_balance, held_balance, client_id, purpose)
+                                VALUES ('CUSTOMER', 'LIABILITY', 'CREDIT', 'EUR', 0, 0, :clientId, 'BANK_SETTLEMENT')
+                                """).param("clientId", owner).update()))
+                .rootCause()
+                .message()
+                .containsAnyOf("accounts_purpose_only_on_system_accounts", "accounts_bank_settlement_is_asset");
+    }
+
     // --- Java and Postgres must agree on id order (see AccountId#compareTo) ---
 
     @Test
@@ -351,6 +408,18 @@ class LedgerSchemaIT {
                 .param("currency", currency)
                 .param("balance", balance, java.sql.Types.BIGINT)
                 .param("clientId", clientId, java.sql.Types.OTHER)
+                .update();
+    }
+
+    private void insertSystemAccount(String type, String normalSide, String currency, String purpose) {
+        jdbc.sql("""
+                        INSERT INTO accounts (kind, type, normal_side, currency, purpose)
+                        VALUES ('SYSTEM', :type, :normalSide, :currency, :purpose)
+                        """)
+                .param("type", type)
+                .param("normalSide", normalSide)
+                .param("currency", currency)
+                .param("purpose", purpose)
                 .update();
     }
 }

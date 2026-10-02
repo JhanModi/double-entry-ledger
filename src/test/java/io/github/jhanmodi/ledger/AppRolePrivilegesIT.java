@@ -15,7 +15,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * What the application's database login may and may not do (ADR-0015). This is the specification for the GRANT
- * statements in V3__grant_app_privileges.sql.
+ * statements in the migrations (V3, V4, and V5).
  *
  * <p>The rest of the integration suite proves the grants are <em>enough</em>, because all of it runs as this login.
  * These tests prove they're <em>no more</em> than enough. Each denial must fail with Postgres's "insufficient
@@ -71,9 +71,12 @@ class AppRolePrivilegesIT {
                         "accounts: INSERT, SELECT",
                         "api_clients: INSERT, SELECT",
                         "api_keys: INSERT, SELECT",
+                        "audit_log: INSERT",
                         "currencies: SELECT",
                         "entries: INSERT, SELECT",
-                        "ledger_transactions: INSERT, SELECT");
+                        "fundings: INSERT, SELECT",
+                        "ledger_transactions: INSERT, SELECT",
+                        "transfers: INSERT, SELECT");
     }
 
     @Test
@@ -112,11 +115,32 @@ class AppRolePrivilegesIT {
     void cannotChangeWhatAnAccountIsOrDeleteOne() {
         // "SET x = x" changes nothing, so the identity trigger would let it through. Only the missing privilege stops
         // it.
-        for (String column : List.of("id", "kind", "type", "normal_side", "currency", "client_id", "created_at")) {
+        for (String column :
+                List.of("id", "kind", "type", "normal_side", "currency", "client_id", "purpose", "created_at")) {
             assertDenied("UPDATE accounts SET " + column + " = " + column);
         }
         assertDenied("DELETE FROM accounts");
         assertDenied("TRUNCATE accounts");
+    }
+
+    // --- Money movements can't be changed, and the audit log can be written but not read or changed ---
+
+    @Test
+    void cannotUpdateDeleteOrTruncateMoneyMovements() {
+        for (String table : List.of("transfers", "fundings")) {
+            assertDenied("UPDATE " + table + " SET amount = amount");
+            assertDenied("DELETE FROM " + table);
+            assertDenied("TRUNCATE " + table);
+        }
+    }
+
+    @Test
+    void cannotReadUpdateDeleteOrTruncateTheAuditLog() {
+        // Even a compromised app can't learn what's in the audit log, or cover its tracks (ADR-0020).
+        assertDenied("SELECT count(*) FROM audit_log");
+        assertDenied("UPDATE audit_log SET action = action");
+        assertDenied("DELETE FROM audit_log");
+        assertDenied("TRUNCATE audit_log");
     }
 
     @Test
@@ -135,7 +159,8 @@ class AppRolePrivilegesIT {
     @Test
     void cannotDisableTriggers() {
         // Only a table's owner may disable its triggers. The app's login owns nothing.
-        for (String table : List.of("entries", "ledger_transactions", "accounts")) {
+        for (String table :
+                List.of("entries", "ledger_transactions", "accounts", "transfers", "fundings", "audit_log")) {
             assertDenied("ALTER TABLE " + table + " DISABLE TRIGGER ALL");
         }
     }

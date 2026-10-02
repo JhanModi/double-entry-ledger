@@ -1,6 +1,6 @@
 # ADR-0017: Tenant isolation and the error format
 
-- **Status:** Accepted
+- **Status:** Accepted. The point that unknown JSON fields are ignored is superseded by [ADR-0021](0021-request-ids-and-strict-request-parsing.md): they're now rejected with 400.
 - **Date:** 2026-10-02
 
 ## Context
