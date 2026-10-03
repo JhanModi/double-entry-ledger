@@ -17,7 +17,6 @@ import io.github.jhanmodi.ledger.ledger.LedgerTransactionType;
 import io.github.jhanmodi.ledger.ledger.PostingRequest;
 import io.github.jhanmodi.ledger.ledger.PostingService;
 import io.github.jhanmodi.ledger.money.CurrencyCode;
-import io.github.jhanmodi.ledger.money.CurrencyMismatchException;
 import io.github.jhanmodi.ledger.money.Money;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -100,7 +99,7 @@ public class FundingService {
         // Only ever the caller's own account (D1-A): another client's, a system account, or a missing one are all 404.
         Account account = ledger.accountOwnedBy(caller.clientId(), command.account());
         if (account.currency() != command.amount().currency()) {
-            throw new CurrencyMismatchException(
+            throw new WrongCurrencyException(
                     account.currency(), command.amount().currency());
         }
         Account bank = ledger.systemAccount(AccountPurpose.BANK_SETTLEMENT, account.currency());

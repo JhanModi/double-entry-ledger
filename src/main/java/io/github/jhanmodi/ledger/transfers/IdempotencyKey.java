@@ -10,7 +10,10 @@ import java.util.regex.Pattern;
  */
 public record IdempotencyKey(String value) {
 
-    private static final Pattern FORMAT = Pattern.compile("[A-Za-z0-9_.:-]{1,255}");
+    /** The format, for validating the {@code Idempotency-Key} header before a key is built from it. */
+    public static final String FORMAT_REGEX = "[A-Za-z0-9_.:-]{1,255}";
+
+    private static final Pattern FORMAT = Pattern.compile(FORMAT_REGEX);
 
     public IdempotencyKey {
         Objects.requireNonNull(value, "value");

@@ -158,8 +158,10 @@ class AccountsApiIT {
         assertThat(bobReadsAlices.status()).isEqualTo(404);
         assertThat(bobReadsAlicesHistory.status()).isEqualTo(404);
         assertThat(bobReadsNothing.status()).isEqualTo(404);
-        // Same body too, so nothing reveals that Alice's account exists. Only "instance" (the path) differs.
-        assertThat(withoutInstance(bobReadsAlices.json())).isEqualTo(withoutInstance(bobReadsNothing.json()));
+        // Same body too, so nothing reveals that Alice's account exists. Only "instance" (the path) and the request id
+        // differ.
+        assertThat(withoutPerRequestFields(bobReadsAlices.json()))
+                .isEqualTo(withoutPerRequestFields(bobReadsNothing.json()));
     }
 
     @Test
@@ -173,16 +175,13 @@ class AccountsApiIT {
     }
 
     @Test
-    void theOwnerAlwaysComesFromTheKeyNeverFromTheBody() {
-        String bobsClientId = UUID.randomUUID().toString();
-        String id = api.post(
-                        "/v1/accounts", aliceKey, "{\"currency\": \"USD\", \"clientId\": \"" + bobsClientId + "\"}")
-                .json()
-                .get("id")
-                .asString();
+    void anOwnerInTheBodyIsRejectedBecauseTheOwnerOnlyEverComesFromTheKey() {
+        // Until M4b an unknown field was silently dropped. Strict parsing (ADR-0021) now makes it an explicit 400.
+        HttpApi.Response response = api.post(
+                "/v1/accounts", aliceKey, "{\"currency\": \"USD\", \"clientId\": \"" + UUID.randomUUID() + "\"}");
 
-        assertThat(queries.accountOwnedBy(alice, accountId(id))).isNotNull();
-        assertThat(api.get("/v1/accounts/" + id, bobKey).status()).isEqualTo(404);
+        assertProblem(response, 400);
+        assertThat(response.json().at("/errors/0/field").asString()).isEqualTo("clientId");
     }
 
     @Test
@@ -220,9 +219,10 @@ class AccountsApiIT {
         return new AccountId(UUID.fromString(id));
     }
 
-    private static JsonNode withoutInstance(JsonNode problem) {
+    private static JsonNode withoutPerRequestFields(JsonNode problem) {
         ObjectNode copy = (ObjectNode) problem.deepCopy();
         copy.remove("instance");
+        copy.remove("requestId");
         return copy;
     }
 }

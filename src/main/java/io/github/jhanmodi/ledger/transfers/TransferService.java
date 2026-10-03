@@ -17,7 +17,6 @@ import io.github.jhanmodi.ledger.ledger.LedgerTransactionType;
 import io.github.jhanmodi.ledger.ledger.PostingRequest;
 import io.github.jhanmodi.ledger.ledger.PostingService;
 import io.github.jhanmodi.ledger.money.CurrencyCode;
-import io.github.jhanmodi.ledger.money.CurrencyMismatchException;
 import io.github.jhanmodi.ledger.money.Money;
 import io.github.jhanmodi.ledger.transfers.TransferAccountNotFoundException.Side;
 import java.sql.SQLException;
@@ -146,7 +145,7 @@ public class TransferService {
 
     private static void requireCurrency(Account account, Money amount) {
         if (account.currency() != amount.currency()) {
-            throw new CurrencyMismatchException(account.currency(), amount.currency());
+            throw new WrongCurrencyException(account.currency(), amount.currency());
         }
     }
 

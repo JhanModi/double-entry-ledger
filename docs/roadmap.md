@@ -39,8 +39,17 @@ The proposal was approved on 2026-10-02 with these decisions:
    - **Planted-bug check, all 7 caught:** a lost race leaking a raw database error, no destination ownership check, no key check first, funding without `admin`, maximum off by one, wrong settlement currency, and a transfer not audited.
      - Without the destination ownership check, the composite foreign key still refused the row and rolled the whole transfer back.
    - **For checkpoint 4:** domain `IllegalArgumentException`s (a zero amount, say) must never reach the API. Bean Validation has to reject those inputs first with 400, or they'd surface as 500s.
-4. 🚧 **HTTP:** endpoints, security rules, business errors (with `requestId` in Problem Details), strict JSON, ArchUnit module rules; remove the unused `spring-boot-starter-security-test`.
-5. ⏳ **Docs and close:** design doc, glossary, README, primer 04, CLAUDE.md, and the end-to-end run.
+4. ✅ **HTTP:**
+   - **Endpoints:** `POST /v1/transfers` (`write`), `GET /v1/transfers/{id}` (`read`, owner-scoped), and `POST /v1/fundings` (`admin`). Each has a security rule, and both POSTs require a validated `Idempotency-Key` header.
+   - **Problem Details:** one type per business error: 404 `account-not-found` (naming `sourceAccountId` or `destinationAccountId`) and `transfer-not-found`; 409 `duplicate-request` with `originalId`; 422 `insufficient-funds`, `currency-mismatch`, `same-account`, `account-closed`, and `amount-too-large` (with `maximum`). Every 400 is `invalid-request` with an `errors` list naming fields or headers. Every problem, 401 and 403 included, carries `requestId`.
+   - **Strict JSON (ADR-0021):** a failing test came first. Before the fix, `{"amount": 10.5}` returned **201 and moved 10 minor units**, and an unknown `clientId` field was accepted. Now amounts must be JSON integers, and unknown fields are a 400.
+   - **Validation before the commands:** `@Positive` amounts and `@MaxCharacters` (counted like Postgres). Without `@Positive`, a zero amount was a 500.
+   - **Fix to checkpoint 3:** the services now throw `WrongCurrencyException` (422) instead of `money.CurrencyMismatchException`. That one means a programming error, and must stay a 500.
+   - **Module rules:** ArchUnit's `MODULES_DEPEND_ONLY_DOWNWARD`, proven against a planted violation. `spring-boot-starter-security-test` removed.
+   - **Tests:** `./mvnw verify` is green: 111 unit tests and 181 integration tests.
+   - **Planted-bug check, all 7 caught:** strict JSON off, the funding rule weakened to `write`, `@Positive` removed, request id missing from Spring's 400s, the header unvalidated, audit depending on clients, and the currency error unmapped.
+     - The weakened rule shows defense in depth: the service's own `admin` check still answered 403, so `FundingsApiIT` passed. `ApiSecurityIT` caught it because an empty body got a 400 (past security) instead of a 403.
+5. 🚧 **Docs and close:** design doc (including the two outdated comments: design §9's Actuator 404s, and `InvariantCheckerIT`'s javadoc), glossary, README, primer 04, CLAUDE.md, and the end-to-end run.
 
 ### Known gaps carried forward (not failures)
 - **Key revocation isn't audited.** `ClientService.revokeKey` has no caller outside tests yet. When a revoke command is built, it must record an `API_KEY_REVOKED` action in the same transaction. That needs a migration, because the allowed actions are a database CHECK (`audit_log_action_known`).

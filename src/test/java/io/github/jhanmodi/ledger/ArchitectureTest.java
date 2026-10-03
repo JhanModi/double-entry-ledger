@@ -4,6 +4,7 @@ import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noCodeUnits;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noFields;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noMethods;
+import static com.tngtech.archunit.library.Architectures.layeredArchitecture;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.tngtech.archunit.base.DescribedPredicate;
@@ -13,13 +14,16 @@ import com.tngtech.archunit.core.domain.JavaClasses;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import com.tngtech.archunit.core.importer.ImportOption;
 import com.tngtech.archunit.lang.ArchRule;
+import io.github.jhanmodi.ledger.ledger.AccountId;
+import io.github.jhanmodi.ledger.money.ModuleRuleViolation;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 /**
- * Architecture rules, checked against the compiled main code (test code is excluded).
+ * Architecture rules, checked against the compiled main code (test code is excluded): no floating point, and module
+ * boundaries.
  *
  * <p>No floating point (ADR-0002): main code may not declare float/double fields, parameters, or return types, and may
  * not call any method or constructor that takes or returns one, such as {@code new BigDecimal(double)} or
@@ -79,6 +83,64 @@ class ArchitectureTest {
 
         FLOATING_POINT_RULES.forEach(
                 rule -> assertThatThrownBy(() -> rule.check(violations)).isInstanceOf(AssertionError.class));
+    }
+
+    // --- Module boundaries (ADR-0001) ---
+
+    private static final String BASE = "io.github.jhanmodi.ledger.";
+
+    /**
+     * Who may depend on whom: each module only on the ones below it, so no module can grow a hidden cycle. The order
+     * is web, then transfers, then ledger, then clients, then audit; money may be used by any of ledger, transfers, and
+     * web. Classes in the base package (the application class and its configuration) belong to no module.
+     *
+     * <p>Empty layers are allowed so the rule can be checked against a handful of classes (see the test below). What
+     * ArchUnit can't check is SQL inside strings, so "only the ledger writes entries" is enforced by the ledger's
+     * package-private repository and by code review, not here.
+     */
+    static final ArchRule MODULES_DEPEND_ONLY_DOWNWARD = layeredArchitecture()
+            .consideringOnlyDependenciesInLayers()
+            .withOptionalLayers(true)
+            .layer("web")
+            .definedBy(BASE + "web..")
+            .layer("transfers")
+            .definedBy(BASE + "transfers..")
+            .layer("ledger")
+            .definedBy(BASE + "ledger..")
+            .layer("clients")
+            .definedBy(BASE + "clients..")
+            .layer("audit")
+            .definedBy(BASE + "audit..")
+            .layer("money")
+            .definedBy(BASE + "money..")
+            .whereLayer("web")
+            .mayNotBeAccessedByAnyLayer()
+            .whereLayer("transfers")
+            .mayOnlyBeAccessedByLayers("web")
+            .whereLayer("ledger")
+            .mayOnlyBeAccessedByLayers("transfers", "web")
+            .whereLayer("clients")
+            .mayOnlyBeAccessedByLayers("ledger", "transfers", "web")
+            .whereLayer("audit")
+            .mayOnlyBeAccessedByLayers("clients", "ledger", "transfers", "web")
+            .whereLayer("money")
+            .mayOnlyBeAccessedByLayers("ledger", "transfers", "web")
+            .because("modules depend only downward (ADR-0001)");
+
+    @Test
+    void modulesDependOnlyDownward() {
+        MODULES_DEPEND_ONLY_DOWNWARD.check(MAIN_CLASSES);
+    }
+
+    /** Proves the rule catches a real violation, and fails for that reason rather than some other. */
+    @Test
+    void theModuleRuleCatchesAViolation() {
+        JavaClasses violation = new ClassFileImporter().importClasses(ModuleRuleViolation.class, AccountId.class);
+
+        assertThatThrownBy(() -> MODULES_DEPEND_ONLY_DOWNWARD.check(violation))
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining(ModuleRuleViolation.class.getName())
+                .hasMessageContaining(AccountId.class.getName());
     }
 
     /** Deliberately breaks every floating-point rule. Lives in test code, so the real check above never sees it. */

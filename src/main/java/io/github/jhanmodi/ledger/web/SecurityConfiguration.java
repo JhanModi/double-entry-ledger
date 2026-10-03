@@ -48,6 +48,13 @@ class SecurityConfiguration {
                         .hasAuthority(Authorities.of(Scope.WRITE))
                         .requestMatchers(HttpMethod.GET, "/v1/accounts/*", "/v1/accounts/*/entries")
                         .hasAuthority(Authorities.of(Scope.READ))
+                        .requestMatchers(HttpMethod.POST, "/v1/transfers")
+                        .hasAuthority(Authorities.of(Scope.WRITE))
+                        .requestMatchers(HttpMethod.GET, "/v1/transfers/*")
+                        .hasAuthority(Authorities.of(Scope.READ))
+                        // Funding creates money the platform owes its customer, so it needs admin (ADR-0018).
+                        .requestMatchers(HttpMethod.POST, "/v1/fundings")
+                        .hasAuthority(Authorities.of(Scope.ADMIN))
                         // Deny by default: an endpoint added without a rule above is unreachable, even with a valid
                         // key.
                         .anyRequest()

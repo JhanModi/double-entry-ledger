@@ -20,7 +20,6 @@ import io.github.jhanmodi.ledger.ledger.LedgerFixtures;
 import io.github.jhanmodi.ledger.ledger.LedgerQueries;
 import io.github.jhanmodi.ledger.ledger.PostingService;
 import io.github.jhanmodi.ledger.money.CurrencyCode;
-import io.github.jhanmodi.ledger.money.CurrencyMismatchException;
 import io.github.jhanmodi.ledger.money.Money;
 import java.util.EnumSet;
 import java.util.List;
@@ -141,7 +140,7 @@ class FundingServiceIT {
     void theAmountMustBeInTheAccountsCurrency() {
         assertThatThrownBy(() ->
                         fundings.fund(new FundingCommand(account, Money.of(100, EUR), "BANK-REF-5", key()), admin))
-                .isInstanceOf(CurrencyMismatchException.class);
+                .isInstanceOf(WrongCurrencyException.class);
         assertThat(queries.balance(account).posted()).isEqualTo(usd(0));
     }
 

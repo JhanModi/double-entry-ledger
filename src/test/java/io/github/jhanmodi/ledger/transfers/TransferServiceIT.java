@@ -22,7 +22,6 @@ import io.github.jhanmodi.ledger.ledger.InvariantChecker;
 import io.github.jhanmodi.ledger.ledger.LedgerFixtures;
 import io.github.jhanmodi.ledger.ledger.LedgerQueries;
 import io.github.jhanmodi.ledger.ledger.PostingService;
-import io.github.jhanmodi.ledger.money.CurrencyMismatchException;
 import io.github.jhanmodi.ledger.money.Money;
 import io.github.jhanmodi.ledger.transfers.TransferAccountNotFoundException.Side;
 import java.time.Duration;
@@ -164,10 +163,10 @@ class TransferServiceIT {
         AccountId euros = ledger.customer(EUR);
 
         assertThatThrownBy(() -> transfers.transfer(new TransferCommand(main, euros, usd(100), null, key()), caller()))
-                .isInstanceOf(CurrencyMismatchException.class);
+                .isInstanceOf(WrongCurrencyException.class);
         assertThatThrownBy(() -> transfers.transfer(
                         new TransferCommand(main, savings, Money.of(100, EUR), null, key()), caller()))
-                .isInstanceOf(CurrencyMismatchException.class);
+                .isInstanceOf(WrongCurrencyException.class);
         assertThat(balance(main)).isEqualTo(usd(1000));
     }
 
