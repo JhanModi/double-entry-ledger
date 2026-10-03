@@ -4,7 +4,18 @@ Each milestone opens with a short proposal (the change-control format in `CLAUDE
 
 Status: ✅ done · 🚧 in progress · 🔍 in review · ⏳ not started
 
-## Current work: M4b (started 2026-10-02)
+## Current work: M4b (implemented 2026-10-02; closing)
+
+### Left to close M4b
+1. ⏳ **Commit checkpoint 5** (the owner). Checkpoints 1 to 4 are committed (`f7a8ce3`, `d9e295e`, `449f39b`, `2faa397`).
+2. ⏳ **CI green:** waiting for the owner to confirm (Claude can't see GitHub).
+3. ⏳ **Teach-back:**
+   1. A client sends a transfer, the response is lost, and it retries with the same `Idempotency-Key`. Walk through what happens on the retry. Which one database object guarantees the money can't move twice? What does the client get back today, and what changes in M6?
+   2. Two identical requests arrive at the same moment, and neither can see the other's uncommitted row. Why can't both commit? And why, until M6, might the loser get 422 instead of 409?
+   3. `AuditLog.record` uses `Propagation.MANDATORY`. What could go wrong with the default, `REQUIRED`? Why is the audit row written in the same transaction rather than after the commit?
+   4. Before checkpoint 4, `{"amount": 10.5}` returned 201. What actually happened, and why is that worse than an error? Which two mechanisms now stop a bad amount before it reaches the ledger: one for `10.5`, one for `0`?
+   5. Funding's scope is checked in `SecurityConfiguration` and again in `FundingService`. When the rule was weakened in the planted-bug check, `FundingsApiIT` still passed. Why? How did `ApiSecurityIT` catch it anyway?
+4. **Then** mark M4b ✅, give feedback on the answers, and post the **M5 proposal** (concurrency).
 
 The proposal was approved on 2026-10-02 with these decisions:
 - **Scope:** money movement only. OpenAPI moves to M7 and rate limiting to M15b (see the tables below).
@@ -49,17 +60,29 @@ The proposal was approved on 2026-10-02 with these decisions:
    - **Tests:** `./mvnw verify` is green: 111 unit tests and 181 integration tests.
    - **Planted-bug check, all 7 caught:** strict JSON off, the funding rule weakened to `write`, `@Positive` removed, request id missing from Spring's 400s, the header unvalidated, audit depending on clients, and the currency error unmapped.
      - The weakened rule shows defense in depth: the service's own `admin` check still answered 403, so `FundingsApiIT` passed. `ApiSecurityIT` caught it because an empty body got a 400 (past security) instead of a 403.
-5. 🚧 **Docs and close:** design doc (including the two outdated comments: design §9's Actuator 404s, and `InvariantCheckerIT`'s javadoc), glossary, README, primer 04, CLAUDE.md, and the end-to-end run.
+5. ✅ **Docs and close:**
+   - **Every 400 is `/problems/invalid-request` with an `errors` list,** including Spring's own: a missing header, a wrong type in the path or query, a body that isn't JSON. Tests came first and failed (no `errors`, and `about:blank` as the type); a fallback covers any rarer Spring 400.
+   - **Docs:** design §3, §4, §5.1–5.2, §6, §7, §8 (endpoints, the M4a decisions recorded here before, request ids, the audit log, and the error catalogue), and §9 (Actuator line corrected). Also the glossary, the README's "Use the API", primer 04, the CLAUDE.md error and race-testing rules, and the `InvariantCheckerIT` javadoc.
+   - **Tests:** `./mvnw verify` is green: 111 unit tests and 182 integration tests.
+   - **Local end-to-end, against Compose Postgres:**
+     - The CLI created two clients (V5 was applied locally on the first run).
+     - `curl` gave the expected status for each step:
+       - 201 for opening accounts, funding, and the transfer; 200 for reading the transfer back.
+       - 409 with `originalId` for the retry.
+       - 403 for funding without `admin`; 404 for another client's transfer.
+       - 400 naming the field for `10.5`, `0`, a missing `Idempotency-Key`, and an unknown field.
+       - Identical 404s for another client's account and a random id.
+       - 422 for insufficient funds and for over the limit (with `maximum`); 401 with no key.
+     - Balances ended exactly as expected.
+     - Database: 9 audit rows for the run (4 by the operator, 5 by API keys, each with its request id and address); none for the 9 rejected requests. USD debits equal credits, and every cached balance matches its entries.
+     - No key secret in the logs, the responses, or any table, and no raw account id in the access log.
 
 ### Known gaps carried forward (not failures)
+- **Nothing checks that a transfer or funding row's amount matches its ledger entries.** Both are written together by the same code, but the invariant checker doesn't compare them yet (ADR-0018).
+- **Local database:** V5 is applied locally, so it must never be edited; new schema changes go in V6.
 - **Key revocation isn't audited.** `ClientService.revokeKey` has no caller outside tests yet. When a revoke command is built, it must record an `API_KEY_REVOKED` action in the same transaction. That needs a migration, because the allowed actions are a database CHECK (`audit_log_action_known`).
 - **Constant-time comparison** is verified by code review, not by a test, because timing tests are unreliable.
 - **Mockito prints a "self-attaching" warning** during integration tests. It's harmless today but will break on a future JDK. Fix it later by adding Mockito as a Java agent in the Surefire/Failsafe `argLine`.
-
-### Decisions from M4a not yet in the design doc (moved there in checkpoint 5)
-- **Invalid credentials are always 401.** An `Authorization` header with an invalid key gets 401 even on public paths such as `/actuator/health`. Only a request with *no* header is treated as anonymous.
-- **Actuator endpoints other than health are never reachable:** 401 without a key, 403 with one (`denyAll`).
-- **History paging:** the page size defaults to 50, with a maximum of 100, and the cursor is the id of the last entry returned.
 
 ## Tier 1: a strong portfolio piece on its own
 
@@ -71,7 +94,7 @@ The proposal was approved on 2026-10-02 with these decisions:
 | ✅ | **M3a Ledger schema & posting** | Accounts, ledger transactions, entries; DB guards (constraints, deferred balance triggers, append-only triggers); posting service; balance and history reads; invariant checker. |
 | ✅ | **M3b Least-privilege DB roles** | `ledger_app` group role with column-level grants (V3 written by the owner); the app connects as a restricted login and Flyway as the owner, in local runs and tests. |
 | ✅ | **M4a Clients, API keys, accounts API** | `api_clients` and `api_keys`; key format, hashing, and constant-time verification; CLI to create a client and key; Spring Security filter, scopes, deny-by-default; tenant isolation (other tenants' accounts are 404); Problem Details errors; open/read accounts, balances, and history over HTTP. |
-| 🚧 | **M4b Transfers, funding, audit log** | Same-client transfers; admin funding of the client's own accounts from seeded bank-settlement accounts; business errors as Problem Details; append-only audit log and request ids; interim idempotency (`Idempotency-Key` plus a unique constraint, 409 on a duplicate); per-currency amount limits; strict JSON (integer amounts only, unknown fields rejected); ArchUnit module rules. |
+| 🔍 | **M4b Transfers, funding, audit log** | Same-client transfers; admin funding of the client's own accounts from seeded bank-settlement accounts; business errors as Problem Details; append-only audit log and request ids; interim idempotency (`Idempotency-Key` plus a unique constraint, 409 on a duplicate); per-currency amount limits; strict JSON (integer amounts only, unknown fields rejected); ArchUnit module rules. Implemented; awaiting CI and teach-back. |
 | ⏳ | **M5 Concurrency** | Ordered locking, `lock_timeout`, retries; 1,000-request and deadlock tests, with the invariant checker (built in M3a) run under concurrency. |
 | ⏳ | **M6 Idempotency** | Claim/replay in the same transaction, request hashing, expiry cleanup; same-key concurrency tests. |
 | ⏳ | **M7 Resume checkpoint** | README, short design doc, architecture diagram v1, demo script; OpenAPI docs for the public demo (a new dependency, so it needs approval); gitleaks history scan, license; repo made public (owner's call). Described as a *ledger and transfers API*. |

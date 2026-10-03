@@ -138,9 +138,19 @@ class TransfersApiIT {
         HttpApi.Response missing = api.post("/v1/transfers", aliceKey, body(main, savings, "100"));
         HttpApi.Response malformed = transfer("has space", body(main, savings, "100"));
 
-        assertProblem(missing, 400, null);
+        assertInvalidFields(missing, "Idempotency-Key");
         assertInvalidFields(malformed, "Idempotency-Key");
         assertThat(balance(main)).isEqualTo(usd(1000));
+    }
+
+    @Test
+    void everyKindOfInvalidInputIsTheSameProblemTypeWithAnErrorsList() {
+        // Whether the framework or this API's own validation caught it, a client sees one shape for "fix your input".
+        assertInvalidFields(api.post("/v1/transfers", aliceKey, body(main, savings, "1")), "Idempotency-Key");
+        assertInvalidFields(api.get("/v1/transfers/not-a-uuid", aliceKey), "transferId");
+        assertInvalidFields(transfer(newKey(), "{not json")); // not about one field: an empty list
+        assertInvalidFields(transfer(newKey(), body(main, savings, "1.5")), "amount.amount");
+        assertInvalidFields(transfer(newKey(), body(main, savings, "0")), "amount.amount");
     }
 
     @Test
@@ -184,7 +194,7 @@ class TransfersApiIT {
     void missingFieldsAndUnsupportedCurrenciesAreNamed() {
         assertInvalidFields(transfer(newKey(), "{}"), "amount", "destinationAccountId", "sourceAccountId");
         assertInvalidFields(transfer(newKey(), bodyWith(main, savings, "100", "GBP", "null")), "amount.currency");
-        assertProblem(transfer(newKey(), "{not json"), 400, "/problems/invalid-request");
+        assertInvalidFields(transfer(newKey(), "{not json"));
     }
 
     // --- 404: accounts and transfers the client doesn't have ---

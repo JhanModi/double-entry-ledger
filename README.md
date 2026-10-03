@@ -5,9 +5,10 @@ A double-entry ledger and payments API in Java and Spring Boot.
 > **Status: early development.** What exists today:
 > - the double-entry ledger core
 > - least-privilege database roles
-> - an authenticated API for opening accounts and reading balances and history
+> - an authenticated API for opening accounts, reading balances and history, funding accounts, and moving money between a client's own accounts
+> - an append-only audit log, and a request id on every response
 >
-> Transfers over the API come next. See the [roadmap](docs/roadmap.md).
+> Next: concurrency hardening (M5), then full idempotency with response replay (M6). See the [roadmap](docs/roadmap.md).
 
 ## Prerequisites
 
@@ -40,11 +41,11 @@ Maven doesn't need to be installed: the Maven Wrapper (`mvnw`) downloads the pin
 
 ## Use the API
 
-1. Create a client and its first API key with the app's command-line mode. It prints the key **once**, so store it safely.
+1. Create a client and its first API key with the app's command-line mode. It prints the key **once**, so store it safely. The `admin` scope is only needed to fund accounts.
    ```bash
-   ./mvnw spring-boot:run "-Dspring-boot.run.arguments=clients create --name=acme --scopes=read,write"
+   ./mvnw spring-boot:run "-Dspring-boot.run.arguments=clients create --name=acme --scopes=read,write,admin"
    ```
-2. With the app running, open a USD account and read it back:
+2. With the app running, open two USD accounts (run this twice), and read one back:
    ```bash
    curl -X POST http://localhost:8080/v1/accounts -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" -d '{"currency":"USD"}'
    ```
@@ -54,8 +55,23 @@ Maven doesn't need to be installed: the Maven Wrapper (`mvnw`) downloads the pin
    ```bash
    curl "http://localhost:8080/v1/accounts/$ACCOUNT_ID/entries?limit=50" -H "Authorization: Bearer $API_KEY"
    ```
+3. Fund the first account with $1,000.00. Until real bank payments exist, this stands in for a deposit, and needs an `admin` key.
+   ```bash
+   curl -X POST http://localhost:8080/v1/fundings -H "Authorization: Bearer $API_KEY" -H "Idempotency-Key: fund-1" -H "Content-Type: application/json" -d "{\"accountId\":\"$ACCOUNT_ID\",\"amount\":{\"amount\":100000,\"currency\":\"USD\"},\"externalReference\":\"BANK-REF-1\"}"
+   ```
+4. Move $250.00 to the second account, then read the transfer back:
+   ```bash
+   curl -X POST http://localhost:8080/v1/transfers -H "Authorization: Bearer $API_KEY" -H "Idempotency-Key: transfer-1" -H "Content-Type: application/json" -d "{\"sourceAccountId\":\"$ACCOUNT_ID\",\"destinationAccountId\":\"$OTHER_ACCOUNT_ID\",\"amount\":{\"amount\":25000,\"currency\":\"USD\"},\"description\":\"rent\"}"
+   ```
+   ```bash
+   curl http://localhost:8080/v1/transfers/$TRANSFER_ID -H "Authorization: Bearer $API_KEY"
+   ```
 
-Amounts are integer minor units plus a currency: `{"amount": 1050, "currency": "USD"}` is $10.50. Errors use RFC 9457 Problem Details. Another client's account returns 404, exactly like one that doesn't exist.
+**Conventions:**
+- **Amounts** are integer minor units plus a currency: `{"amount": 1050, "currency": "USD"}` is $10.50. Anything else, such as `10.5` or `"1050"`, is rejected, and so are fields the API doesn't define.
+- **Every money-moving POST needs an `Idempotency-Key` header.** Sending the same key again never moves money twice; it gets a 409 naming the original. Until M6, a retry doesn't get the original response back.
+- **Errors** use RFC 9457 Problem Details, with one `type` per kind of error ([catalogue](docs/design.md#errors)) and a `requestId` that matches the `X-Request-Id` header.
+- **Another client's account** returns 404, exactly like one that doesn't exist.
 
 ## Test
 

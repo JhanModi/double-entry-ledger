@@ -10,6 +10,8 @@ The terms used in code, docs, and the API. Use them consistently, and add to thi
 - **Debit / credit.** The two sides of an entry. Neither means "good" or "bad". Whether a debit increases or decreases a balance depends on the account's normal side.
 - **Normal side.** The side that increases an account's balance. Assets and expenses are debit-normal. Liabilities, equity, and revenue are credit-normal.
 - **Asset account.** Something the platform has, e.g., cash at the partner bank (the bank-settlement account).
+- **Bank-settlement account.** The system account for the cash the platform holds at its bank, one per currency. An asset. Money from outside arrives through it: a funding debits it and credits a customer.
+- **Account purpose.** The job of a system account that code needs to find, such as `BANK_SETTLEMENT`. Code finds such an account by purpose and currency, never by a hard-coded id, and there's at most one per purpose and currency.
 - **Liability account.** Something the platform owes. Customer wallets are liabilities, because the platform owes that money to its customers.
 - **Entry.** One line of a ledger transaction: an account, a direction, and a positive amount in minor units. (In accounting textbooks, "journal entry" often means the whole transaction. Here "entry" always means one line.)
 - **Ledger transaction.** A group of entries that is recorded atomically and balances per currency. Immutable once written.
@@ -38,7 +40,9 @@ The terms used in code, docs, and the API. Use them consistently, and add to thi
 
 ## Payments
 
-- **Transfer.** An instant movement between two customer accounts inside the ledger. One database transaction.
+- **Transfer.** An instant movement between two customer accounts of the same client, inside the ledger. One database transaction. The `transfers` row records the business intent (who asked, in which request, with which idempotency key), and its ledger transaction records the money.
+- **Funding.** Money arriving in a customer account from outside: the bank-settlement account is debited and the customer credited. Until M9 it's an API call with an `admin` key, standing in for a real inbound bank payment, and only for the caller's own accounts. Carries the bank's **external reference**, for reconciliation.
+- **Amount limit.** The most one transfer or funding may move in a currency, set to roughly a million US dollars of real value (design §10). A sanity cap, not a risk limit.
 - **Payment.** Money entering or leaving the system through the (mock) bank. It has a lifecycle and isn't instant.
 - **Hold.** A reservation of funds for an outbound payment. It lowers the available balance without posting entries. Status: ACTIVE, CAPTURED, or RELEASED. Has an expiry time.
 - **Authorization.** Placing a hold. The payment becomes AUTHORIZED.
@@ -49,17 +53,22 @@ The terms used in code, docs, and the API. Use them consistently, and add to thi
 
 ## Reliability
 
-- **Idempotency key.** A client-chosen unique value sent with a write request. Repeating the request with the same key has the same effect as sending it once.
+- **Idempotency key.** A client-chosen unique value sent with a write request, in the `Idempotency-Key` header. Repeating the request with the same key has the same effect as sending it once. Keys are unique per client. Until M6 a repeat gets 409 naming the original; from M6 it gets the original response.
+- **Duplicate request.** A request whose idempotency key the client already used. Answered with 409 and the original's id, and never applied again.
 - **Exactly-once effect.** A request may be *delivered* more than once, but its effect happens only once.
 - **At-least-once delivery.** A message may arrive more than once but is never lost. Consumers must deduplicate.
 - **Transactional outbox.** Events are written to a table in the same database transaction as the change they describe, then published by a relay.
 - **Dual write.** Writing to two systems (e.g., database and broker) without a shared transaction. One can succeed while the other fails.
 - **Reconciliation.** Comparing our ledger against an external record (the bank statement) and flagging differences. It never auto-corrects.
+- **Defense in depth.** Guarding one rule in more than one layer, so a mistake in one layer isn't enough to break it. For example, the scope is checked by the security rules and again by the service, and ownership by the query and again by a composite foreign key. Each layer needs its own test, because one layer can hide that another is broken.
+- **Race test.** A test that makes two operations overlap and checks the result is still correct. Here, threads start together on a latch, and a test that needs one exact interleaving holds a transaction open and waits until Postgres reports the other is blocked, rather than sleeping.
 
 ## Database
 
 - **Constraint.** A rule the database enforces on every write, e.g. `CHECK (amount > 0)`, whichever program does the writing.
 - **Constraint trigger (deferred).** A trigger whose check waits until `COMMIT`. Used for "a transaction's debits equal its credits," which is only true once every entry is in.
+- **Composite foreign key.** A foreign key over several columns, e.g. `(account_id, client_id, currency) → accounts (id, client_id, currency)`: the row must point to an account with *this* id, *this* owner, and *this* currency. Used so the database itself refuses a transfer that touches another client's account.
+- **Unique constraint as a guard.** `UNIQUE (client_id, idempotency_key)` means two transactions can't both commit the same key. The second one waits for the first; if the first commits, the second fails and rolls back.
 - **Append-only.** Rows can be inserted but never updated or deleted. Corrections are new rows.
 - **Keyset pagination.** Paging by "rows after the last one I saw" (a cursor) instead of `OFFSET`. Costs the same on every page, and new rows don't shift earlier pages.
 - **UUIDv7.** A UUID that starts with a timestamp, so new ids sort in creation order (ADR-0014).
@@ -79,7 +88,14 @@ The terms used in code, docs, and the API. Use them consistently, and add to thi
 - **401 vs 403.** 401 Unauthorized means "I don't know who you are" (no key, or an invalid one). 403 Forbidden means "I know who you are, and you can't do this" (a valid key without the needed scope).
 - **Deny by default.** Every endpoint needs an explicit security rule; anything without one is refused.
 - **IDOR (insecure direct object reference).** Reaching someone else's data by changing an id in a request. Prevented here by putting the owner in the SQL (ADR-0017).
-- **Problem Details (RFC 9457).** The standard JSON error format (`type`, `title`, `status`, `detail`, `instance`), served as `application/problem+json`.
+- **Problem Details (RFC 9457).** The standard JSON error format (`type`, `title`, `status`, `detail`, `instance`), served as `application/problem+json`. Each kind of error has its own **problem type**, such as `/problems/insufficient-funds`, so clients can branch on it (catalogue in design §8).
+- **400 vs 404 vs 409 vs 422.** 400: the input is malformed (`invalid-request`, naming the fields). 404: the client has no such thing. 409: it repeats something already done. 422: well-formed, but the business rules refuse it.
+- **Caller.** An API client making one request: its verified key plus the request's id and source address. Services that change something take a `Caller`, so they can check its scope and audit it.
+- **Request id.** A UUID the server gives every request. It's in the `X-Request-Id` header, in every error, on every log line, and on audit rows, so one id ties a client's report to everything the request did. Never taken from the client.
+- **MDC (Mapped Diagnostic Context).** A per-thread map the logger adds to every line. The request id is put there for the length of the request and removed afterwards, because the server reuses threads.
+- **Audit log.** An append-only record of who did what, to what, when, and from where, written in the same transaction as the action. The app may only insert into it.
+- **Actor.** Who performed an audited action: an API key (with its client, request, and address) or the operator at the command line.
+- **Strict parsing.** Request JSON is read without guessing: an amount must be a JSON integer (never `10.5`, `"1050"`, or `1e3`), and an unknown field is an error rather than being ignored.
 - **Tenant isolation.** A client can never see or move another client's money.
 - **FX quote.** A locked exchange rate with an expiry, single-use, bound to one client and currency pair.
 - **Spread.** The difference between the market rate and the quoted rate. The platform's FX revenue, posted to a fee account.

@@ -1,6 +1,6 @@
 # Design: Double-Entry Ledger & Payments API
 
-> **Status:** design only. Nothing below is implemented yet. Each section is filled in as its milestone lands (see [roadmap](roadmap.md)). Public-facing docs describe only what exists.
+> **Status:** each section is filled in as its milestone lands (see [roadmap](roadmap.md)). Where a section or table row names a finished milestone, it describes what exists; the rest is design. Public-facing docs describe only what exists.
 
 ## 1. Purpose and scope
 
@@ -42,14 +42,17 @@ API client ──HTTPS + API key──▶ ┌───────────�
 |---|---|---|
 | `money` | `Money`, currencies, rounding, allocation | M2 |
 | `ledger` | accounts, ledger transactions, entries, balances, invariant checker | M3a, M3b, M5 |
-| `clients` | API clients, API keys, scopes | M4 |
-| `transfers` | instant internal transfers | M4 |
-| `idempotency` | idempotency keys | M6 |
-| `audit` | append-only audit log | M4 |
+| `clients` | API clients, API keys, scopes, the `Caller` making a request | M4a |
+| `transfers` | transfers and fundings: instant movements, amount limits, interim idempotency keys | M4b |
+| `idempotency` | idempotency keys: claim, request hash, replay | M6 |
+| `audit` | append-only audit log; request ids | M4b |
+| `web` | HTTP: security rules, controllers, request ids, Problem Details | M4a, M4b |
 | `payments` | payments, holds, bank instructions, recovery sweeper, `BankRail` | M9a, M9b |
 | `outbox` | outbox events, relay, `EventPublisher` | M10 |
 | `reconciliation` | statement import, matching, results | M11 |
 | `fx` | rates, quotes, conversions | M12 |
+
+**Dependencies run one way** (ArchUnit, `ArchitectureTest`): web → transfers → ledger → clients → audit, and money is used by ledger, transfers, and web. A module never depends on one above it, so no cycle can form.
 
 ## 4. Data model
 
@@ -64,18 +67,55 @@ Since M3a. Migration: `V2__create_ledger.sql`. Decisions: [ADR-0003](adr/0003-en
 
 All ids are UUIDv7. Customer `posted_balance` is a cache of the entries, updated in the same transaction by SQL delta. System accounts have NULL balance columns, and their balance is derived from entries.
 
+Since M4a (`V4`): `api_clients`, `api_keys` (hash only), and `accounts.client_id`, which every customer account has and no system account has.
+
+Since M4b (`V5__create_transfers_fundings_and_audit_log.sql`; [ADR-0018](adr/0018-transfers-and-funding-over-the-ledger.md) to [ADR-0020](adr/0020-audit-log-in-the-business-transaction.md)):
+
+| Table | Holds | Key rules (enforced by the database) |
+|---|---|---|
+| `accounts.purpose` | The job of a system account code must find, e.g. `BANK_SETTLEMENT` | Only on system accounts; one per purpose and currency; bank settlement is an asset; never changes. V5 creates one bank-settlement account per currency. |
+| `transfers` | One row per transfer: client, idempotency key, both accounts, amount, description, request id | Both accounts belong to the row's client and are in its currency (composite foreign keys); different accounts; `amount > 0`; `UNIQUE (client_id, idempotency_key)`; one row per ledger transaction; append-only |
+| `fundings` | One row per funding: client, idempotency key, account, amount, external reference, request id | The account belongs to the row's client and is in its currency; `amount > 0`; reference of 1–100 characters; `UNIQUE (client_id, idempotency_key)`; one row per ledger transaction; append-only |
+| `audit_log` | Who did what, to what, when, and from where | An API-key actor has a client, a key of that client, a request id, and an address; the CLI operator has none of these; known actions only; append-only; the app may only INSERT |
+
+A transfer or funding row and its ledger transaction are written in one database transaction. The ledger stays generic: the business record points to it, never the other way round.
+
 ## 5. Key flows
 
-### 5.1 Transfer (M4–M6)
-All steps run in one database transaction at READ COMMITTED:
-1. Authenticate, check scope, and validate.
-2. Claim the idempotency key ([ADR-0007](adr/0007-idempotency-in-the-business-transaction.md)).
-3. Lock customer accounts in id order ([ADR-0005](adr/0005-pessimistic-row-locking.md)).
-4. Check ownership and available funds.
-5. Insert entries and apply balance deltas, then write the outbox event and audit row.
-6. Store the response and commit.
+### 5.1 Transfer (built in M4b; changes in M5 and M6)
 
-### 5.2 Payment lifecycle (M9a–M9b)
+**Before the transaction**, each step can answer the request on its own:
+1. `RequestIdFilter` gives the request its id (ADR-0021).
+2. The key is authenticated (401) and the security rule checked (`write`, 403).
+3. The input is validated (400 `invalid-request`): the `Idempotency-Key` header, integer and positive amounts, known fields only, and description length.
+4. The command is built: two different accounts and an amount within the limit, or 422.
+
+**In one database transaction** at READ COMMITTED, started by `TransferService` with a `TransactionTemplate`:
+1. The service checks the `write` scope again (defense in depth).
+2. **Has this client used this idempotency key?** If so, the answer is 409 with the original's id, and nothing else happens. This comes first, so a retry is recognized even after the money has been spent.
+3. **Look up both accounts owner-scoped:** 404, naming `sourceAccountId` or `destinationAccountId`. Then check that both are in the amount's currency: 422.
+4. **Post the ledger transaction:** debit the source and credit the destination. The posting service applies balance deltas in ascending id order, and the `CHECK` backstop rejects an overdraft (422). A closed account is also 422.
+5. **Insert the transfer row.** Its composite foreign keys re-check ownership and currency, and its unique key guards the idempotency key.
+6. **Write the audit row** (`TRANSFER_CREATED`), then commit.
+
+**If step 5 hits the unique key:** a duplicate request committed while this one was running. This transaction rolls back, the service looks up the winner, and the answer is 409 with its id ([ADR-0019](adr/0019-interim-idempotency-before-m6.md)).
+
+**M5 adds:** lock both accounts in id order and check funds before writing anything; `lock_timeout`; retries on deadlock ([ADR-0005](adr/0005-pessimistic-row-locking.md)).
+
+**M6 replaces step 2:** claim the key first in `idempotency_keys`, hash the request, and replay the stored response ([ADR-0007](adr/0007-idempotency-in-the-business-transaction.md)).
+
+**M10 adds:** the outbox event in step 6.
+
+### 5.2 Funding (M4b)
+
+Funding has the same shape as a transfer, with these differences ([ADR-0018](adr/0018-transfers-and-funding-over-the-ledger.md)):
+- It needs the `admin` scope, both in the security rules and in the service.
+- It credits one of the caller's own accounts and debits the bank-settlement account for its currency. That account is found by `purpose`, and its id never appears in the API.
+- It records the bank's external reference, and the ledger description is `Deposit <reference>`.
+
+It stands in for inbound bank payments until M9.
+
+### 5.3 Payment lifecycle (M9a–M9b)
 
 | Transition | Ledger effect |
 |---|---|
@@ -103,6 +143,8 @@ These must hold at all times. The invariant checker verifies the ones that can b
 8. One idempotency key produces at most one effect.
 9. Payment status changes only through allowed transitions, and every change is recorded in history.
 10. No ledger transaction is reversed more than once.
+11. Every transfer and funding points to exactly one ledger transaction, and only to accounts of its own client in its own currency (M4b, enforced by the database).
+12. An audit row exists for an action if and only if the action was committed (M4b, same transaction).
 
 ## 7. Failure modes
 
@@ -110,8 +152,9 @@ These must hold at all times. The invariant checker verifies the ones that can b
 
 | Scenario | Outcome | Mechanism | Test (milestone) |
 |---|---|---|---|
-| Client retries after a timeout | Money moves once; the stored response is replayed | ADR-0007 | M6 |
-| Two withdrawals race on one account | At most the available funds are spent | ADR-0005 | M5 |
+| Client retries after a timeout | Money moves once. Until M6 the retry gets 409 with the original's id; from M6 the stored response is replayed | Unique key (ADR-0019), then ADR-0007 | M4b (`TransferServiceIT`, `FundingServiceIT`, `TransfersApiIT`); M6 |
+| The same request arrives twice at the same moment | One is applied, never both. The other gets 409, or until M6 possibly 422 if the first spent the money | `UNIQUE (client_id, idempotency_key)` | M4b (`TransferServiceIT`: a held-transaction race and an 8-way race) |
+| Two withdrawals race on one account | At most the available funds are spent | SQL delta plus `CHECK` (M4b); ordered locks (M5, ADR-0005) | M4b smoke test (`concurrentTransfersNeverOverdrawTheSource`); M5 full suite |
 | Opposite transfers A→B and B→A at once | No deadlock | ADR-0005 (lock order) | M5 |
 | Server crashes mid-transfer | Transaction rolls back; nothing half-applied | Single DB transaction | M3a (`PostingServiceIT`: a failed posting leaves no entries) |
 | A posting would overdraw a customer | Rejected; the whole posting rolls back | `CHECK` backstop, translated to `InsufficientFundsException` | M3a (`PostingServiceIT`, `RandomPostingsIT`) |
@@ -121,6 +164,12 @@ These must hold at all times. The invariant checker verifies the ones that can b
 | Someone sends a guessed, tampered, revoked, or disabled client's key | 401, the same answer for every case | `ApiKeyVerifier` (constant-time compare, no reason given) | M4a (`ApiSecurityIT`, `ApiKeyVerifierIT`) |
 | A new endpoint is added without a security rule | Unreachable, even with every scope | Deny-by-default rules | M4a (`ApiSecurityIT`) |
 | An API key leaks | Revoke it; it stops working at once. Only its hash was ever stored. | `revoked_at`; hash-only storage | M4a (`ApiKeyVerifierIT`) |
+| A client sends `10.5`, `"1050"`, or `1e3` as an amount | 400 naming `amount.amount`; nothing moves. (Before M4b's fix, `10.5` silently became 10.) | Strict parsing (ADR-0021) | M4b (`TransfersApiIT`) |
+| A transfer names another client's account | 404, identical to a missing account. Even if the Java check were missing, the database rejects the row and the whole transfer rolls back | `accountOwnedBy`; composite foreign keys (ADR-0018) | M4b (`TransfersApiIT`, `MoneyMovementSchemaIT`; planted-bug check) |
+| Something fails after the money moved but before the transfer or audit row is written | Everything rolls back together | One transaction; `AuditLog` requires one (`MANDATORY`) | M4b (`AuditLogIT`, `TransferServiceIT`) |
+| A money endpoint is added without its scope rule | Still refused: the service checks the scope too | `Caller.requireScope` | M4b (`FundingServiceIT`, `ApiSecurityIT`) |
+| A compromised app tries to read or erase the audit trail | Denied | INSERT-only grant; append-only triggers | M4b (`AppRolePrivilegesIT`, `AuditLogSchemaIT`) |
+| A client reports an error | Its `requestId` finds the request's log line and audit row | Request ids (ADR-0021) | M4b (`RequestIdIT`, `AccountsApiIT`, `TransfersApiIT`) |
 | The app is tricked into running arbitrary SQL (e.g., injection) | It can't edit history, change account identity, disable triggers, set replica mode, alter or drop the schema, or touch migration history | Restricted login with least-privilege grants | M3b (`AppRolePrivilegesIT`) |
 | Crash after authorization, before bank submit | Sweeper submits exactly once | ADR-0010 | M9b |
 | Bank succeeds, then the call times out | Instruction UNKNOWN, hold kept, settled once | ADR-0010 | M9b |
@@ -140,10 +189,53 @@ The general rules are in `CLAUDE.md`.
    - An invalid key, or a scheme other than Bearer: 401 straight away.
    - A valid key: the request runs as that client, with one authority per scope.
 3. **`ApiKeyVerifier` decides validity:** look up the key id, compare `SHA-256(secret)` in constant time, reject revoked keys and disabled clients. All failures look the same.
-4. **The security rules map each endpoint to a scope:** `GET /v1/accounts/**` needs `read`, and `POST /v1/accounts` needs `write`. Anything without a rule is denied, even with a valid key.
+4. **The security rules map each endpoint to a scope** (table below). Anything without a rule is denied, even with a valid key. Services that move money check the scope again.
 5. **Controllers look accounts up with `accountOwnedBy(client, id)`,** so another client's account, a system account, or a missing one all give the same 404.
 
-The first client and key come from the command line (`clients create`), not an endpoint. Every error, including 401 and 403, is RFC 9457 Problem Details.
+| Endpoint | Scope | Since |
+|---|---|---|
+| `POST /v1/accounts` | `write` | M4a |
+| `GET /v1/accounts/{id}`, `GET /v1/accounts/{id}/entries` | `read` | M4a |
+| `POST /v1/transfers` (needs `Idempotency-Key`) | `write` | M4b |
+| `GET /v1/transfers/{id}` | `read` | M4b |
+| `POST /v1/fundings` (needs `Idempotency-Key`) | `admin`, for the caller's own accounts only | M4b |
+| `GET /actuator/health` | none | M1 |
+
+**Other rules:**
+- The first client and key come from the command line (`clients create`), not an endpoint.
+- Invalid credentials are always 401, even on a public path such as `/actuator/health`. Only a request with no `Authorization` header is treated as anonymous.
+- Actuator endpoints other than health are never reachable: 401 without a key, 403 with one.
+- History pages hold 50 entries by default and 100 at most, and the cursor is the id of the last entry returned.
+
+### Request ids, the audit log, and strict input (M4b)
+
+- **Request ids** ([ADR-0021](adr/0021-request-ids-and-strict-request-parsing.md)): `RequestIdFilter` runs before authentication. It gives each request a server-generated UUID, which goes:
+  - in the `X-Request-Id` header and in every error's `requestId`
+  - on every log line (the MDC)
+  - on the audit, transfer, and funding rows
+
+  Each request also leaves one access-log line with its method, route template, and status, never the raw path. That line is where rejected requests are recorded.
+- **Audit log** ([ADR-0020](adr/0020-audit-log-in-the-business-transaction.md)): opening an account, a transfer, a funding, creating a client, and issuing a key are each audited in the same transaction as the action. The app can write the log but not read or change it.
+- **Strict input:** an amount must be a JSON integer, and an unknown field is a 400. Bean Validation rejects malformed input (such as a zero amount) before any domain object is built. A domain `IllegalArgumentException` that reaches the API is a bug, and it's a 500.
+
+### Errors
+
+Every error is RFC 9457 Problem Details (`application/problem+json`) with a `requestId`. Stack traces and internal messages never reach a response.
+
+| Status | `type` | When | Extra fields |
+|---|---|---|---|
+| 400 | `/problems/invalid-request` | Any malformed input: a missing or invalid header, a body that isn't JSON, an unknown field, a non-integer or non-positive amount, a wrong type in the path or query | `errors`: `[{field, message}]`, empty only when no single field is at fault |
+| 401 | `/problems/unauthorized` | No key, or an invalid one | |
+| 403 | `/problems/forbidden` | The key lacks the scope | |
+| 404 | `/problems/account-not-found` | An account the client doesn't own (missing, another client's, or a system account: all alike). Transfers name the field | |
+| 404 | `/problems/transfer-not-found` | A transfer the client doesn't own | |
+| 409 | `/problems/duplicate-request` | The `Idempotency-Key` was already used | `originalId` |
+| 422 | `/problems/insufficient-funds` | The source can't cover the amount | |
+| 422 | `/problems/currency-mismatch` | The amount isn't in the account's currency | |
+| 422 | `/problems/same-account` | The source and destination are the same | |
+| 422 | `/problems/account-closed` | A closed account would send or receive | |
+| 422 | `/problems/amount-too-large` | Above the currency's limit (§10) | `maximum` |
+| 500 | `/problems/internal-error` | Anything unexpected; logged on the server | |
 
 ### Database trust model (M3b, [ADR-0015](adr/0015-least-privilege-database-roles.md))
 
@@ -162,7 +254,9 @@ Strategy: unit, property-based, integration against real Postgres, concurrency, 
 **In place since M1:**
 - **Unit tests** (`*Test`, Surefire, `./mvnw test`): no Docker.
 - **Integration tests** (`*IT`, Failsafe, `./mvnw verify`): boot the real application against `postgres:18` in Docker through Testcontainers. `@ServiceConnection` points the datasource at the container. The Spring test context is cached, so test classes with the same configuration share one container.
-- **Current coverage** (`ApplicationIT`): the health endpoint is UP; Actuator endpoints other than `health` return 404; Flyway created and seeded `currencies`.
+- **First coverage** (`ApplicationIT`, M1): the health endpoint is UP; Actuator endpoints other than `health` are unreachable (401 without a key since M4a); Flyway created and seeded `currencies`.
+- **Race tests without sleeps** (M4b, `TransferServiceIT`): to force a specific interleaving, a test holds one transaction open and waits until Postgres reports (`pg_locks`) that the other is blocked, then lets the first commit. Threads start together on a latch.
+- **Planted-bug checks:** at the end of each checkpoint, bugs are planted in a scratchpad copy of the code to confirm the tests catch them. The roadmap records each run.
 - **CI** (`.github/workflows/ci.yml`): `./mvnw verify` on Temurin 25, plus a gitleaks scan of the full git history.
 
 ## 10. Money rules (M2)

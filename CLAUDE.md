@@ -9,7 +9,7 @@ Guidance for Claude Code in this repository. Read all of it before doing any wor
 - **The owner's goal:** to understand every engineering decision and be able to defend it in an interview. Claude acts as a senior software architect and mentor, not a code generator.
 - **Project name:** `double-entry-ledger`.
 - **Product:** a double-entry ledger and payments API (backend only). API clients are businesses. They hold customer accounts, move money between them with instant transfers, and send or receive payments through a simulated bank. Every movement is a balanced, append-only posting, and balances can be proven correct.
-- **Status (2026-10-02):** M4a (clients, API keys, accounts API) is done. M4b (transfers, funding, audit log) is in progress: its proposal is approved, and it's being built in the checkpoints listed in `docs/roadmap.md`. After M4b come M5, M6, and M7. No JPA: `JdbcClient` everywhere.
+- **Status (2026-10-02):** M4b (transfers, funding, audit log, request ids, strict JSON) is implemented, and `./mvnw verify` passes. Still needed to close it: CI green and the owner's teach-back answers. After M4b come M5, M6, and M7. No JPA: `JdbcClient` everywhere.
 
 ### Where things are
 - `docs/roadmap.md`: milestones, their status, and decisions still open. **Check it at the start of every session.**
@@ -150,7 +150,12 @@ These apply regardless of stack. The concrete architecture is in `docs/design.md
 - **Every new endpoint needs an explicit rule in `SecurityConfiguration`** with the scope it requires. Anything without a rule is denied by design; never replace `denyAll()` with `authenticated()`.
 - **Client-facing account lookups go through `LedgerQueries.accountOwnedBy(client, id)`.** Never load an account by id and check ownership afterwards. A non-owned account must give the same 404 as a missing one.
 - **The owning client always comes from the authenticated principal**, never from the request body or parameters.
-- **Errors are Problem Details** (`ApiExceptionHandler`), and stack traces and internal messages never reach a response.
+- **Errors are Problem Details** (`ApiExceptionHandler`), and stack traces and internal messages never reach a response. The catalogue is in `docs/design.md` §8, "Errors".
+  - Every error carries `requestId`.
+  - Every 400 is `/problems/invalid-request`, with an `errors` list naming each field, header, or parameter at fault.
+  - Each business error has its own problem type (404, 409, or 422).
+- **Validate before building domain objects.** Bean Validation rejects malformed input (400) before any command is built. A domain `IllegalArgumentException` that reaches the API is a validation gap, and correctly a 500.
+- **Client mistakes and programming errors are different exceptions.** A client mistake is a typed exception mapped to a 4xx (e.g. `WrongCurrencyException`). A programming error stays a 500 (e.g. `money.CurrencyMismatchException`). Never map a programming-error exception to a 4xx.
 - **Never log API keys or put them in exception messages.** Types that hold a key secret must hide it in `toString()`.
 - **Beans that need the web server** (like the security filter chain) must be `@ConditionalOnWebApplication`, because the command-line mode runs without one. `ClientsCommandIT` runs in a non-web context to catch this.
 
@@ -214,6 +219,9 @@ These apply regardless of stack. The concrete architecture is in `docs/design.md
   - **End-to-end:** a few tests covering the core flow.
 - Property-based tests check the money invariants: entries always balance, allocations preserve totals, and money is never created or destroyed.
 - Every operation that changes a balance has concurrency tests.
+  - Start threads together on a latch.
+  - To force one exact interleaving, hold a transaction open and wait until Postgres reports the other blocked (`pg_locks`), as `TransferServiceIT` does. Never sleep for a guessed time.
+- When a rule is guarded in two layers (defense in depth), test each layer on its own. Otherwise one layer can hide that the other is broken.
 - Idempotency tests confirm that retries and duplicate requests never apply twice.
 - Authorization tests confirm that user A can never read or change user B's resources.
 - Failure-mode tests cover external timeouts and errors, partial failures, and a crash between steps.

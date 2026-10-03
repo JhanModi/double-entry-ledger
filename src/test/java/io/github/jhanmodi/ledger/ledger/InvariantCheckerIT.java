@@ -24,8 +24,8 @@ import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * The specification for {@link InvariantChecker}: the owner's M3a exercise. These fail until both queries in
- * InvariantChecker are written.
+ * The specification for {@link InvariantChecker}: a correct ledger is reported clean, and each kind of corruption the
+ * checker exists to find is reported exactly.
  *
  * <p>Each test starts from an empty ledger. {@code @DirtiesContext} gives this class a fresh Spring context, and with it
  * a fresh Postgres container, and {@code @Transactional} rolls every test back when it finishes. Because nothing is

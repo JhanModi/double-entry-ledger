@@ -19,6 +19,7 @@ import java.util.List;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.TypeMismatchException;
 import org.springframework.core.MethodParameter;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -30,6 +31,9 @@ import org.springframework.validation.FieldError;
 import org.springframework.validation.method.ParameterErrors;
 import org.springframework.validation.method.ParameterValidationResult;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingRequestHeaderException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
+import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -38,6 +42,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.RequestAttributes;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 import tools.jackson.core.JacksonException;
 import tools.jackson.core.exc.InputCoercionException;
@@ -60,6 +65,10 @@ import tools.jackson.databind.exc.UnrecognizedPropertyException;
 class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(ApiExceptionHandler.class);
+
+    private static final URI ABOUT_BLANK = URI.create("about:blank");
+    private static final URI INVALID_REQUEST_TYPE = URI.create("/problems/invalid-request");
+    private static final String INVALID_REQUEST_TITLE = "Invalid request";
 
     // --- 404: not one of the client's own ---
 
@@ -179,6 +188,10 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     }
 
     // --- 400: malformed input, naming the fields at fault ---
+    //
+    // Every 400 is the same problem type, /problems/invalid-request, with an "errors" list of {field, message}. The
+    // list names the fields, headers, or parameters at fault, and is empty only when no single one is (a body that
+    // isn't JSON). Whether this API's validation or Spring's request handling caught it, the client sees one shape.
 
     /** A request body that parsed, but failed validation (e.g. a zero amount, or a missing field). */
     @Override
@@ -216,12 +229,7 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
             HttpMessageNotReadableException e, HttpHeaders headers, HttpStatusCode status, WebRequest request) {
         JacksonException parse = jacksonCause(e);
         if (parse == null || parse.getPath().isEmpty()) {
-            ProblemDetail problem = problemDetail(
-                    HttpStatus.BAD_REQUEST,
-                    "invalid-request",
-                    "Invalid request",
-                    "The request body is missing or isn't valid JSON.");
-            return handleExceptionInternal(e, problem, headers, HttpStatus.BAD_REQUEST, request);
+            return invalidRequest(e, "The request body is missing or isn't valid JSON.", List.of(), headers, request);
         }
         String field = jsonPath(parse);
         String message = switch (parse) {
@@ -238,6 +246,34 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         return invalidRequest(e, List.of(new InvalidField(field, message)), headers, request);
     }
 
+    /** A required header that wasn't sent, such as {@code Idempotency-Key}. */
+    @Override
+    protected @Nullable ResponseEntity<Object> handleServletRequestBindingException(
+            ServletRequestBindingException e, HttpHeaders headers, HttpStatusCode status, WebRequest request) {
+        if (e instanceof MissingRequestHeaderException missing) {
+            return invalidRequest(
+                    e, List.of(new InvalidField(missing.getHeaderName(), "is required")), headers, request);
+        }
+        return invalidRequest(e, List.of(), headers, request);
+    }
+
+    /** A required query parameter that wasn't sent. */
+    @Override
+    protected @Nullable ResponseEntity<Object> handleMissingServletRequestParameter(
+            MissingServletRequestParameterException e, HttpHeaders headers, HttpStatusCode status, WebRequest request) {
+        return invalidRequest(e, List.of(new InvalidField(e.getParameterName(), "is required")), headers, request);
+    }
+
+    /** A path variable or query parameter that isn't the right type, such as an id that isn't a UUID. */
+    @Override
+    protected @Nullable ResponseEntity<Object> handleTypeMismatch(
+            TypeMismatchException e, HttpHeaders headers, HttpStatusCode status, WebRequest request) {
+        String field = e instanceof MethodArgumentTypeMismatchException argument
+                ? argument.getName()
+                : String.valueOf(e.getPropertyName());
+        return invalidRequest(e, List.of(new InvalidField(field, "has the wrong type or format")), headers, request);
+    }
+
     // --- 500: anything unexpected ---
 
     /** Logged in full on the server; the client gets no details about the internals. */
@@ -252,11 +288,22 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
                 "Something went wrong on our side. It has been logged.");
     }
 
-    /** Adds the request id to the problems the parent class creates, as {@link #problem} does for this class's own. */
+    /**
+     * The last step for every problem the parent class creates. Adds the request id, as {@link #problem} does for this
+     * class's own. And any 400 the overrides above don't cover (Spring has a few rarer ones) still becomes
+     * {@code invalid-request} with an {@code errors} list, keeping Spring's own detail text.
+     */
     @Override
     protected ResponseEntity<Object> createResponseEntity(
             @Nullable Object body, HttpHeaders headers, HttpStatusCode statusCode, WebRequest request) {
         if (body instanceof ProblemDetail problem) {
+            if (statusCode.value() == HttpStatus.BAD_REQUEST.value() && ABOUT_BLANK.equals(problem.getType())) {
+                problem.setType(INVALID_REQUEST_TYPE);
+                problem.setTitle(INVALID_REQUEST_TITLE);
+                if (problem.getProperties() == null || !problem.getProperties().containsKey("errors")) {
+                    problem.setProperty("errors", List.of());
+                }
+            }
             withRequestId(problem, request.getAttribute(RequestIdFilter.ATTRIBUTE, RequestAttributes.SCOPE_REQUEST));
         }
         return super.createResponseEntity(body, headers, statusCode, request);
@@ -274,14 +321,17 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     private @Nullable ResponseEntity<Object> invalidRequest(
             Exception e, List<InvalidField> fields, HttpHeaders headers, WebRequest request) {
+        return invalidRequest(e, "Some of the request's fields are invalid; see errors.", fields, headers, request);
+    }
+
+    private @Nullable ResponseEntity<Object> invalidRequest(
+            Exception e, String detail, List<InvalidField> fields, HttpHeaders headers, WebRequest request) {
         List<InvalidField> sorted = fields.stream()
                 .sorted(Comparator.comparing(InvalidField::field))
                 .toList();
-        ProblemDetail problem = problemDetail(
-                HttpStatus.BAD_REQUEST,
-                "invalid-request",
-                "Invalid request",
-                "Some of the request's fields are invalid; see errors.");
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, detail);
+        problem.setType(INVALID_REQUEST_TYPE);
+        problem.setTitle(INVALID_REQUEST_TITLE);
         problem.setProperty("errors", sorted);
         return handleExceptionInternal(e, problem, headers, HttpStatus.BAD_REQUEST, request);
     }

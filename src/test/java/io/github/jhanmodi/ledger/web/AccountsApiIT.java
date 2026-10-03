@@ -18,7 +18,9 @@ import io.github.jhanmodi.ledger.ledger.LedgerFixtures;
 import io.github.jhanmodi.ledger.ledger.LedgerQueries;
 import io.github.jhanmodi.ledger.ledger.PostingService;
 import io.github.jhanmodi.ledger.money.Money;
+import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -186,19 +188,20 @@ class AccountsApiIT {
 
     @Test
     void rejectsAnUnsupportedOrMissingCurrency() {
-        assertProblem(api.post("/v1/accounts", aliceKey, "{\"currency\": \"GBP\"}"), 400);
-        assertProblem(api.post("/v1/accounts", aliceKey, "{}"), 400);
-        assertProblem(api.post("/v1/accounts", aliceKey, "{not json"), 400);
+        assertInvalidFields(api.post("/v1/accounts", aliceKey, "{\"currency\": \"GBP\"}"), "currency");
+        assertInvalidFields(api.post("/v1/accounts", aliceKey, "{}"), "currency");
+        assertInvalidFields(api.post("/v1/accounts", aliceKey, "{not json"));
     }
 
     @Test
     void rejectsMalformedIdsAndPageSizes() {
         String id = openAccount(aliceKey);
 
-        assertProblem(api.get("/v1/accounts/not-a-uuid", aliceKey), 400);
-        assertProblem(api.get("/v1/accounts/" + id + "/entries?limit=0", aliceKey), 400);
-        assertProblem(api.get("/v1/accounts/" + id + "/entries?limit=101", aliceKey), 400);
-        assertProblem(api.get("/v1/accounts/" + id + "/entries?cursor=not-a-uuid", aliceKey), 400);
+        assertInvalidFields(api.get("/v1/accounts/not-a-uuid", aliceKey), "accountId");
+        assertInvalidFields(api.get("/v1/accounts/" + id + "/entries?limit=0", aliceKey), "limit");
+        assertInvalidFields(api.get("/v1/accounts/" + id + "/entries?limit=101", aliceKey), "limit");
+        assertInvalidFields(api.get("/v1/accounts/" + id + "/entries?limit=ten", aliceKey), "limit");
+        assertInvalidFields(api.get("/v1/accounts/" + id + "/entries?cursor=not-a-uuid", aliceKey), "cursor");
     }
 
     private void assertProblem(HttpApi.Response response, int status) {
@@ -206,6 +209,17 @@ class AccountsApiIT {
         assertThat(response.contentType())
                 .hasValueSatisfying(type -> assertThat(type).startsWith("application/problem+json"));
         assertThat(response.body()).doesNotContain("Exception").doesNotContain("\"trace\"");
+    }
+
+    /** A 400 of the one type every invalid input gets, naming exactly these fields (none, if no one field is at fault). */
+    private void assertInvalidFields(HttpApi.Response response, String... fields) {
+        assertProblem(response, 400);
+        assertThat(response.json().get("type").asString()).isEqualTo("/problems/invalid-request");
+        List<String> named = new ArrayList<>();
+        response.json()
+                .get("errors")
+                .forEach(error -> named.add(error.get("field").asString()));
+        assertThat(named).containsExactly(fields);
     }
 
     private String openAccount(String key) {
