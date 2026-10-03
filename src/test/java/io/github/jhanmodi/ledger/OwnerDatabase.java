@@ -7,9 +7,10 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * A connection as the database owner, separate from the application's restricted login. Only for tests that need to
- * show what holds even for the most privileged role. Deliberately not a {@code DataSource} bean: if it were, Spring
- * Boot would hand it to the application too.
+ * A connection as the database owner, separate from the application's restricted login. Only for tests that need what
+ * the app's login can't do: showing that the database's guards catch a mistake even when the owner makes it, or reading
+ * the audit log. Deliberately not a {@code DataSource} bean: if it were, Spring Boot would hand it to the application
+ * too.
  */
 public final class OwnerDatabase {
 

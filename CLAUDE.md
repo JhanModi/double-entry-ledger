@@ -9,7 +9,7 @@ Guidance for Claude Code in this repository. Read all of it before doing any wor
 - **The owner's goal:** to understand every engineering decision and be able to defend it in an interview. Claude acts as a senior software architect and mentor, not a code generator.
 - **Project name:** `double-entry-ledger`.
 - **Product:** a double-entry ledger and payments API (backend only). API clients are businesses. They hold customer accounts, move money between them with instant transfers, and send or receive payments through a simulated bank. Every movement is a balanced, append-only posting, and balances can be proven correct.
-- **Status (2026-10-02):** M4b (transfers, funding, audit log, request ids, strict JSON) is implemented, and `./mvnw verify` passes. Still needed to close it: CI green and the owner's teach-back answers. After M4b come M5, M6, and M7. No JPA: `JdbcClient` everywhere.
+- **Status (2026-10-03):** M4b is closed. M5 (concurrency: lock-then-check, lock timeout, deadlock retries, the 1,000-request suite) is implemented, and `./mvnw verify` passes. Still needed to close it: CI green and the owner's teach-back answers. After M5 come M6 and M7. No JPA: `JdbcClient` everywhere.
 
 ### Where things are
 - `docs/roadmap.md`: milestones, their status, and decisions still open. **Check it at the start of every session.**
@@ -153,7 +153,7 @@ These apply regardless of stack. The concrete architecture is in `docs/design.md
 - **Errors are Problem Details** (`ApiExceptionHandler`), and stack traces and internal messages never reach a response. The catalogue is in `docs/design.md` §8, "Errors".
   - Every error carries `requestId`.
   - Every 400 is `/problems/invalid-request`, with an `errors` list naming each field, header, or parameter at fault.
-  - Each business error has its own problem type (404, 409, or 422).
+  - Each business error has its own problem type (404, 409, or 422). An account busy past the lock timeout is 503 `account-busy` with `Retry-After` (ADR-0022), never 409 (which means "already done") or 429 (rate limiting).
 - **Validate before building domain objects.** Bean Validation rejects malformed input (400) before any command is built. A domain `IllegalArgumentException` that reaches the API is a validation gap, and correctly a 500.
 - **Client mistakes and programming errors are different exceptions.** A client mistake is a typed exception mapped to a 4xx (e.g. `WrongCurrencyException`). A programming error stays a 500 (e.g. `money.CurrencyMismatchException`). Never map a programming-error exception to a 4xx.
 - **Never log API keys or put them in exception messages.** Types that hold a key secret must hide it in `toString()`.
@@ -173,9 +173,12 @@ These apply regardless of stack. The concrete architecture is in `docs/design.md
 ### Ledger and payment rules for this project
 - **Writes:** only the `ledger` module writes entries and balances, and every posting goes through the posting service.
   - Balance changes are SQL deltas (`SET posted_balance = posted_balance + :delta`), never a read-modify-write in Java.
-- **Locking** ([ADR-0005](docs/adr/0005-pessimistic-row-locking.md)): customer accounts are locked with `FOR NO KEY UPDATE`, in ascending id order.
-  - Re-read balances after locking.
+- **Locking** ([ADR-0005](docs/adr/0005-pessimistic-row-locking.md), [ADR-0022](docs/adr/0022-lock-timeouts-retries-and-the-busy-response.md)): customer accounts are locked with `FOR NO KEY UPDATE`, in ascending id order, in one statement (`AccountRepository.lockForPosting`).
+  - Lock, then check, then write: status and balances are trusted only once re-read under the lock (`BalanceChanges.requirePostable`). Only fields a trigger keeps fixed may be read without a lock.
   - System accounts are never locked.
+  - Every posting sets a transaction-local `lock_timeout` (2 seconds by default); a timeout becomes `AccountBusyException` (503).
+  - Money-moving services start their transactions through `RetryingTransactions`, which retries deadlocks and serialization failures (at most 3 attempts) and never retries a lock timeout. Don't add a second retry layer anywhere else.
+  - The `CHECK` backstop's error is deliberately not translated: if it fires, the check under the lock is wrong, and that must surface as a 500.
 - **Transactions:** no network or other external calls inside a database transaction.
 - **System accounts** are never addressable through the public API.
 - **Payment status** changes only through conditional updates (`WHERE id = ? AND status = ?`, exactly one row affected), and every change is recorded in history.
@@ -220,7 +223,8 @@ These apply regardless of stack. The concrete architecture is in `docs/design.md
 - Property-based tests check the money invariants: entries always balance, allocations preserve totals, and money is never created or destroyed.
 - Every operation that changes a balance has concurrency tests.
   - Start threads together on a latch.
-  - To force one exact interleaving, hold a transaction open and wait until Postgres reports the other blocked (`pg_locks`), as `TransferServiceIT` does. Never sleep for a guessed time.
+  - To force one exact interleaving, hold a transaction open and wait until Postgres reports the other blocked (`pg_locks`). Use the test helpers `HeldTransaction` and `DatabaseLocks` (see `PostingLocksIT`). Never sleep for a guessed time.
+  - Deadlock tests call the posting service without the retry layer; otherwise a retry would hide a broken lock order.
 - When a rule is guarded in two layers (defense in depth), test each layer on its own. Otherwise one layer can hide that the other is broken.
 - Idempotency tests confirm that retries and duplicate requests never apply twice.
 - Authorization tests confirm that user A can never read or change user B's resources.

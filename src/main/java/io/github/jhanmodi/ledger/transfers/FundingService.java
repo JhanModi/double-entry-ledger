@@ -16,6 +16,7 @@ import io.github.jhanmodi.ledger.ledger.LedgerTransactionId;
 import io.github.jhanmodi.ledger.ledger.LedgerTransactionType;
 import io.github.jhanmodi.ledger.ledger.PostingRequest;
 import io.github.jhanmodi.ledger.ledger.PostingService;
+import io.github.jhanmodi.ledger.ledger.RetryingTransactions;
 import io.github.jhanmodi.ledger.money.CurrencyCode;
 import io.github.jhanmodi.ledger.money.Money;
 import java.time.OffsetDateTime;
@@ -27,7 +28,6 @@ import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Funds one of the caller's own accounts from the bank-settlement account for its currency (ADR-0018). It stands in for
@@ -55,7 +55,7 @@ public class FundingService {
     private final LedgerQueries ledger;
     private final PostingService postings;
     private final AuditLog audit;
-    private final TransactionTemplate transactions;
+    private final RetryingTransactions transactions;
 
     public FundingService(
             JdbcClient jdbc,
@@ -67,15 +67,17 @@ public class FundingService {
         this.ledger = ledger;
         this.postings = postings;
         this.audit = audit;
-        this.transactions = new TransactionTemplate(transactionManager);
+        this.transactions = new RetryingTransactions(transactionManager);
     }
 
     /**
-     * Credits the account, or throws and moves nothing. Started with a {@link TransactionTemplate} for the same reason
-     * as {@link TransferService#transfer}: a duplicate that loses the race can only be identified after rolling back.
+     * Credits the account, or throws and moves nothing. The transaction is started here for the same reasons as
+     * {@link TransferService#transfer}: a deadlock is retried, and a duplicate that loses the race can only be
+     * identified after rolling back.
      *
      * @throws DuplicateRequestException this client already used the key
      * @throws io.github.jhanmodi.ledger.ledger.AccountNotFoundException the account isn't one of the caller's
+     * @throws io.github.jhanmodi.ledger.ledger.AccountBusyException another request held the account too long
      */
     public Funding fund(FundingCommand command, Caller caller) {
         caller.requireScope(Scope.ADMIN);

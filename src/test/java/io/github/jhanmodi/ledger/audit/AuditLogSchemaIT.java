@@ -126,7 +126,8 @@ class AuditLogSchemaIT {
         assertRejected(() -> insert(row), "audit_log_target_id_check");
     }
 
-    // --- Append-only, even for the owner ---
+    // --- Append-only: the triggers reject the owner's mistakes too. They don't stop an owner who disables them on
+    // purpose (ADR-0015). ---
 
     @Test
     void auditRowsCannotBeUpdatedDeletedOrTruncated() {

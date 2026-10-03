@@ -97,6 +97,7 @@ Parsing JSON into Java involves **coercion**: turning one kind of value into ano
 | 409 | This repeats something already done |
 | 422 | Well-formed, but the business rules say no (insufficient funds, wrong currency, …) |
 | 500 | A bug on our side, logged and never explained to the client |
+| 503 | Try again later: other requests are using the same account (added in M5; primer 05) |
 
 A rule of thumb: if a domain `IllegalArgumentException` reaches the API, validation missed something, so it's a 500, not a 400. That's why `@Positive` rejects a zero amount before any command is built.
 

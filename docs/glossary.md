@@ -62,6 +62,13 @@ The terms used in code, docs, and the API. Use them consistently, and add to thi
 - **Reconciliation.** Comparing our ledger against an external record (the bank statement) and flagging differences. It never auto-corrects.
 - **Defense in depth.** Guarding one rule in more than one layer, so a mistake in one layer isn't enough to break it. For example, the scope is checked by the security rules and again by the service, and ownership by the query and again by a composite foreign key. Each layer needs its own test, because one layer can hide that another is broken.
 - **Race test.** A test that makes two operations overlap and checks the result is still correct. Here, threads start together on a latch, and a test that needs one exact interleaving holds a transaction open and waits until Postgres reports the other is blocked, rather than sleeping.
+- **Lock, then check, then write.** How a posting stays correct under concurrency (ADR-0005): lock the accounts, re-read what can change (status, balances) under the lock, check it, and only then write. Nothing can change the locked values before the commit, so the check can't go stale.
+- **Lock order.** The one order in which every posting locks accounts: ascending id. Two postings can then never each hold a lock the other is waiting for.
+- **Deadlock.** Two transactions each waiting for a lock the other holds. Postgres notices after `deadlock_timeout` (1 second) and aborts one of them with SQLSTATE `40P01`.
+- **Lock timeout.** The longest a statement may wait for a lock: Postgres's `lock_timeout`, set to 2 seconds for each posting's transaction (ADR-0022). When it runs out, the statement fails with SQLSTATE `55P03`, and the client gets 503 `account-busy`.
+- **Transaction retry.** Running a whole transaction again after Postgres aborted it to break a deadlock. Safe because the aborted attempt left nothing behind. Done by `RetryingTransactions`: at most 3 attempts, and never for a lock timeout.
+- **Jitter.** A random part of the pause before a retry, so two transactions that collided don't retry at the same moment and collide again.
+- **Account busy.** The 503 answer when other requests held an account for longer than the lock timeout, or a transaction was aborted on every attempt. Nothing moved, and retrying with the same idempotency key is safe. Comes with `Retry-After: 1`.
 
 ## Database
 
@@ -69,10 +76,12 @@ The terms used in code, docs, and the API. Use them consistently, and add to thi
 - **Constraint trigger (deferred).** A trigger whose check waits until `COMMIT`. Used for "a transaction's debits equal its credits," which is only true once every entry is in.
 - **Composite foreign key.** A foreign key over several columns, e.g. `(account_id, client_id, currency) → accounts (id, client_id, currency)`: the row must point to an account with *this* id, *this* owner, and *this* currency. Used so the database itself refuses a transfer that touches another client's account.
 - **Unique constraint as a guard.** `UNIQUE (client_id, idempotency_key)` means two transactions can't both commit the same key. The second one waits for the first; if the first commits, the second fails and rolls back.
-- **Append-only.** Rows can be inserted but never updated or deleted. Corrections are new rows.
+- **Append-only.** Rows can be inserted but never updated or deleted. Corrections are new rows. Enforced in two layers: triggers reject an update or delete by any role, which catches mistakes, and privileges stop the app. The triggers aren't a defense against the owner or a superuser, who can switch them off on purpose (ADR-0015).
 - **Keyset pagination.** Paging by "rows after the last one I saw" (a cursor) instead of `OFFSET`. Costs the same on every page, and new rows don't shift earlier pages.
 - **UUIDv7.** A UUID that starts with a timestamp, so new ids sort in creation order (ADR-0014).
 - **REPEATABLE READ.** An isolation level where every query in a transaction sees the same snapshot of the database.
+- **Row lock.** A lock on one row, held until the transaction ends. `SELECT … FOR NO KEY UPDATE` is the kind a posting takes on each customer account. It makes other writers of that row wait, but not the lighter `FOR KEY SHARE` lock that a foreign-key check takes, and never a plain `SELECT`.
+- **SQLSTATE.** The five-character code Postgres puts on every error, such as `40P01` (deadlock) or `55P03` (lock not available). Code here recognizes database errors by it, not by the message's wording.
 - **Role.** A Postgres user or group. A *login role* can connect; a *group role* (NOLOGIN) holds privileges that its members inherit.
 - **Least privilege.** Giving each component exactly the access it needs and nothing more. The app's login can read and insert ledger rows and update three account columns (ADR-0015).
 - **Owner.** The role that created a table. It can do anything to that table, including disabling its triggers, so it's trusted and used for migrations only.
@@ -89,7 +98,7 @@ The terms used in code, docs, and the API. Use them consistently, and add to thi
 - **Deny by default.** Every endpoint needs an explicit security rule; anything without one is refused.
 - **IDOR (insecure direct object reference).** Reaching someone else's data by changing an id in a request. Prevented here by putting the owner in the SQL (ADR-0017).
 - **Problem Details (RFC 9457).** The standard JSON error format (`type`, `title`, `status`, `detail`, `instance`), served as `application/problem+json`. Each kind of error has its own **problem type**, such as `/problems/insufficient-funds`, so clients can branch on it (catalogue in design §8).
-- **400 vs 404 vs 409 vs 422.** 400: the input is malformed (`invalid-request`, naming the fields). 404: the client has no such thing. 409: it repeats something already done. 422: well-formed, but the business rules refuse it.
+- **400 vs 404 vs 409 vs 422 vs 503.** 400: the input is malformed (`invalid-request`, naming the fields). 404: the client has no such thing. 409: it repeats something already done. 422: well-formed, but the business rules refuse it. 503: try again later, because other requests are using the same account (`account-busy`).
 - **Caller.** An API client making one request: its verified key plus the request's id and source address. Services that change something take a `Caller`, so they can check its scope and audit it.
 - **Request id.** A UUID the server gives every request. It's in the `X-Request-Id` header, in every error, on every log line, and on audit rows, so one id ties a client's report to everything the request did. Never taken from the client.
 - **MDC (Mapped Diagnostic Context).** A per-thread map the logger adds to every line. The request id is put there for the length of the request and removed afterwards, because the server reuses threads.

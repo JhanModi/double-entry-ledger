@@ -12,8 +12,9 @@ public record AccountId(UUID value) implements Comparable<AccountId> {
 
     /**
      * Orders ids the way Postgres orders UUIDs: as unsigned bytes. {@link UUID#compareTo} compares signed numbers and
-     * disagrees with Postgres for ids whose first bit is set. Balances are updated (and, from M5, rows are locked) in
-     * ascending id order to prevent deadlocks, so Java and SQL must agree on what "ascending" means.
+     * disagrees with Postgres for ids whose first bit is set. Postings lock accounts in ascending id order to prevent
+     * deadlocks (ADR-0005): the lock query sorts in SQL, and {@code BalanceChanges} lists the same accounts in Java, so
+     * Java and SQL must agree on what "ascending" means.
      */
     @Override
     public int compareTo(AccountId other) {

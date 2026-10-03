@@ -1,11 +1,14 @@
 package io.github.jhanmodi.ledger.web;
 
+import static io.github.jhanmodi.ledger.DatabaseLocks.lockAccount;
 import static io.github.jhanmodi.ledger.HttpApi.bearer;
 import static io.github.jhanmodi.ledger.money.CurrencyCode.EUR;
 import static io.github.jhanmodi.ledger.money.CurrencyCode.USD;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.github.jhanmodi.ledger.HeldTransaction;
 import io.github.jhanmodi.ledger.HttpApi;
+import io.github.jhanmodi.ledger.OwnerDatabase;
 import io.github.jhanmodi.ledger.TestcontainersConfiguration;
 import io.github.jhanmodi.ledger.clients.ClientId;
 import io.github.jhanmodi.ledger.clients.ClientService;
@@ -52,6 +55,9 @@ class TransfersApiIT {
 
     @Autowired
     LedgerQueries queries;
+
+    @Autowired
+    OwnerDatabase owner;
 
     HttpApi api;
     LedgerFixtures ledger;
@@ -247,6 +253,30 @@ class TransfersApiIT {
         assertThat(tooLarge.json().at("/maximum/currency").asString()).isEqualTo("USD");
 
         assertThat(balance(main)).isEqualTo(usd(1000));
+    }
+
+    // --- 503: busy, retry later (ADR-0022) ---
+
+    @Test
+    void aTransferThatWaitsTooLongForABusyAccountIsA503AndIsSafeToRetryWithTheSameKey() {
+        String key = newKey();
+
+        HttpApi.Response busy;
+        // Another transaction holds the source account for longer than the 2-second lock timeout.
+        try (HeldTransaction other = HeldTransaction.start(owner, sql -> lockAccount(sql, main))) {
+            busy = transfer(key, body(main, savings, "300"));
+        }
+
+        assertProblem(busy, 503, "/problems/account-busy");
+        assertThat(busy.retryAfter()).contains("1");
+        assertThat(busy.json().get("requestId").asString())
+                .isEqualTo(busy.requestId().orElseThrow());
+        assertThat(balance(main)).isEqualTo(usd(1000));
+
+        // Nothing moved and the key wasn't used, so the same request with the same key now goes through, once.
+        HttpApi.Response retry = transfer(key, body(main, savings, "300"));
+        assertThat(retry.status()).as(retry.body()).isEqualTo(201);
+        assertThat(balance(main)).isEqualTo(usd(700));
     }
 
     // --- Request ids (ADR-0021) ---

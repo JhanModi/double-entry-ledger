@@ -87,4 +87,39 @@ class AccountRepository {
                 .query(ACCOUNT)
                 .list();
     }
+
+    /**
+     * Locks these customer accounts' rows until the transaction ends, and returns their status and balances as of the
+     * lock (ADR-0005). Waits for any other transaction holding one of them, up to the lock timeout.
+     *
+     * <ul>
+     *   <li><b>In ascending id order:</b> Postgres sorts the rows ({@code ORDER BY}) before it locks them, so every
+     *       posting takes its locks in the same order and two postings can't deadlock. Ids never change (a trigger
+     *       rejects it), so the order can't shift while a lock is being waited for.
+     *   <li><b>{@code FOR NO KEY UPDATE}</b> rather than {@code FOR UPDATE}: it doesn't block the lighter
+     *       {@code KEY SHARE} locks that foreign keys take when entries, transfers, and fundings that point at the
+     *       account are inserted.
+     *   <li><b>Customer accounts only:</b> a system account is never locked, even if one is passed by mistake. Every
+     *       funding in a currency touches the same settlement account, so locking it would make them all wait in line.
+     * </ul>
+     */
+    List<LockedAccount> lockForPosting(Collection<AccountId> ids) {
+        if (ids.isEmpty()) {
+            return List.of();
+        }
+        return jdbc.sql("""
+                        SELECT id, status, posted_balance, held_balance
+                        FROM accounts
+                        WHERE id IN (:ids) AND kind = 'CUSTOMER'
+                        ORDER BY id
+                        FOR NO KEY UPDATE
+                        """)
+                .param("ids", ids.stream().map(AccountId::value).toList())
+                .query((rs, rowNum) -> new LockedAccount(
+                        new AccountId(rs.getObject("id", UUID.class)),
+                        AccountStatus.valueOf(rs.getString("status")),
+                        rs.getLong("posted_balance"),
+                        rs.getLong("held_balance")))
+                .list();
+    }
 }

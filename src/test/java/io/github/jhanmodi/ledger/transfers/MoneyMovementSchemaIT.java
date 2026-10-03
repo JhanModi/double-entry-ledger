@@ -27,7 +27,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 /**
  * Proves each database guard on the {@code transfers} and {@code fundings} tables (V5, ADR-0018, ADR-0019) works on its
  * own, by going around the Java code with raw SQL as the database owner. The same approach as LedgerSchemaIT: these
- * guards catch mistakes by any role, even the most privileged one.
+ * guards catch mistakes by any role, the owner's included. They don't stop an owner who disables them on purpose
+ * (ADR-0015).
  *
  * <p>Every statement runs in a rolled-back transaction, so nothing here is ever committed, and even a missing guard
  * can't damage the shared test database. Rows that need a ledger transaction get a bare one in the same transaction;

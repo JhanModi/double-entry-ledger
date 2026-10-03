@@ -25,6 +25,7 @@ An ADR records one significant decision: the context, the options considered, wh
 | [0019](0019-interim-idempotency-before-m6.md) | Interim idempotency until M6 | Accepted |
 | [0020](0020-audit-log-in-the-business-transaction.md) | An append-only audit log, written in the business transaction | Accepted |
 | [0021](0021-request-ids-and-strict-request-parsing.md) | Request ids and strict request parsing | Accepted |
+| [0022](0022-lock-timeouts-retries-and-the-busy-response.md) | Lock timeouts, deadlock retries, and the busy response | Accepted |
 
 ## Template
 

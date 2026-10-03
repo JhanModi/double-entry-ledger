@@ -1,11 +1,14 @@
 package io.github.jhanmodi.ledger.transfers;
 
+import static io.github.jhanmodi.ledger.DatabaseLocks.awaitASessionWaitingForALock;
+import static io.github.jhanmodi.ledger.DatabaseLocks.lockAccount;
 import static io.github.jhanmodi.ledger.money.CurrencyCode.EUR;
 import static io.github.jhanmodi.ledger.money.CurrencyCode.USD;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.github.jhanmodi.ledger.HeldTransaction;
 import io.github.jhanmodi.ledger.OwnerDatabase;
 import io.github.jhanmodi.ledger.TestcontainersConfiguration;
 import io.github.jhanmodi.ledger.clients.Caller;
@@ -36,6 +39,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.function.IntFunction;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -47,8 +51,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Transfers against a real database: money moves, every rejection moves and records nothing, a retry never moves money
- * twice (ADR-0019), and concurrent transfers never overdraw an account. The full concurrency suite is M5's; the race
- * tests here cover what M4b claims.
+ * twice (ADR-0019), concurrent transfers never overdraw an account, and a transfer aborted to break a deadlock is retried
+ * (ADR-0022). The full concurrency suite is ConcurrencyIT.
  *
  * <p>Alice's business owns the accounts. Each test starts her main USD account with 10.00 USD.
  */
@@ -245,7 +249,7 @@ class TransferServiceIT {
             // has to wait for the first's lock on the balances.
             Future<Transfer> second = pool.submit(
                     () -> transfers.transfer(new TransferCommand(main, savings, usd(100), null, key), secondCaller));
-            awaitASessionWaitingForALock();
+            awaitASessionWaitingForALock(owner);
             commitTheFirst.countDown();
 
             // Once the first commits, the second's insert hits the unique key, rolls back, and reports the original.
@@ -281,7 +285,42 @@ class TransferServiceIT {
         assertThat(transfersWithKey(key)).isOne();
     }
 
-    // --- Concurrency smoke test (M5 has the full suite) ---
+    // --- Deadlocks (ADR-0022) ---
+
+    @Test
+    void aTransferThatPostgresAbortsToBreakADeadlockIsRetriedAndMovesTheMoneyOnce() throws Exception {
+        List<AccountId> byId = Stream.of(main, savings).sorted().toList();
+        AccountId lower = byId.get(0);
+        AccountId higher = byId.get(1);
+        IdempotencyKey key = key();
+        Caller caller = caller();
+        ExecutorService transferThread = Executors.newSingleThreadExecutor();
+        try (HeldTransaction other = HeldTransaction.start(owner, sql -> lockAccount(sql, higher))) {
+            // The transfer locks the lower id, then waits for the higher one, which the other transaction holds.
+            Future<Transfer> transfer = transferThread.submit(
+                    () -> transfers.transfer(new TransferCommand(main, savings, usd(100), null, key), caller));
+            awaitASessionWaitingForALock(owner);
+
+            // Now the other transaction asks for the lower id, so each waits for the other: a deadlock. The transfer
+            // has waited longer, so its deadlock check runs first, and Postgres aborts it (SQLSTATE 40P01).
+            Future<Void> otherGetsTheLowerId = other.then(sql -> lockAccount(sql, lower));
+            // Only the transfer's rollback can free the lower id, so this completing proves the first attempt was
+            // aborted. The other transaction then lets go of both.
+            HeldTransaction.await(otherGetsTheLowerId);
+            other.rollback();
+
+            // The retry finds both accounts free.
+            assertThat(transfer.get(WAIT_LIMIT.toSeconds(), SECONDS).amount()).isEqualTo(usd(100));
+        } finally {
+            transferThread.shutdownNow();
+        }
+        assertThat(balance(main)).isEqualTo(usd(900));
+        assertThat(balance(savings)).isEqualTo(usd(100));
+        assertThat(transfersWithKey(key)).isOne();
+        assertThat(auditedIn(caller)).hasSize(1);
+    }
+
+    // --- Concurrency smoke test (the full suite is ConcurrencyIT) ---
 
     @Test
     void concurrentTransfersNeverOverdrawTheSource() throws Exception {
@@ -361,24 +400,6 @@ class TransferServiceIT {
 
     private static <T> List<T> ofType(List<Object> outcomes, Class<T> type) {
         return outcomes.stream().filter(type::isInstance).map(type::cast).toList();
-    }
-
-    /**
-     * Waits until some database session is blocked waiting for a lock. Polls a condition Postgres reports, rather than
-     * sleeping for a guessed time, so it's as fast as the database and fails clearly if the wait never happens.
-     */
-    private void awaitASessionWaitingForALock() {
-        long deadline = System.nanoTime() + WAIT_LIMIT.toNanos();
-        while (owner.jdbc()
-                        .sql("SELECT count(*) FROM pg_locks WHERE NOT granted")
-                        .query(Long.class)
-                        .single()
-                == 0) {
-            if (System.nanoTime() > deadline) {
-                throw new AssertionError("no session started waiting for a lock within " + WAIT_LIMIT);
-            }
-            Thread.onSpinWait();
-        }
     }
 
     private static void awaitUninterruptibly(CountDownLatch latch) {

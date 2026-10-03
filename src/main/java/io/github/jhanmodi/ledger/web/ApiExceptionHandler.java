@@ -1,6 +1,7 @@
 package io.github.jhanmodi.ledger.web;
 
 import io.github.jhanmodi.ledger.clients.ScopeRequiredException;
+import io.github.jhanmodi.ledger.ledger.AccountBusyException;
 import io.github.jhanmodi.ledger.ledger.AccountClosedException;
 import io.github.jhanmodi.ledger.ledger.AccountNotFoundException;
 import io.github.jhanmodi.ledger.ledger.InsufficientFundsException;
@@ -13,6 +14,7 @@ import io.github.jhanmodi.ledger.transfers.WrongCurrencyException;
 import io.github.jhanmodi.ledger.web.ApiJson.MoneyJson;
 import jakarta.servlet.http.HttpServletRequest;
 import java.net.URI;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -59,7 +61,8 @@ import tools.jackson.databind.exc.UnrecognizedPropertyException;
  * can quote it and support can find the request's log lines.
  *
  * <p>Status codes: 400 for input that is malformed, 404 for something the client doesn't have, 409 for a request that
- * repeats one already done, and 422 for a well-formed request that the business rules refuse.
+ * repeats one already done, 422 for a well-formed request that the business rules refuse, and 503 for one that should
+ * be retried later because other requests are using the same account.
  */
 @RestControllerAdvice
 class ApiExceptionHandler extends ResponseEntityExceptionHandler {
@@ -69,6 +72,9 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     private static final URI ABOUT_BLANK = URI.create("about:blank");
     private static final URI INVALID_REQUEST_TYPE = URI.create("/problems/invalid-request");
     private static final String INVALID_REQUEST_TITLE = "Invalid request";
+
+    /** How long a client should wait before retrying a request that got 503 account-busy (ADR-0022). */
+    private static final Duration RETRY_AFTER_WHEN_BUSY = Duration.ofSeconds(1);
 
     // --- 404: not one of the client's own ---
 
@@ -185,6 +191,29 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
                 "One request may move at most the amount given in maximum, in minor units.");
         problem.setProperty("maximum", MoneyJson.of(e.maximum()));
         return problem;
+    }
+
+    // --- 503: busy, try again later. Nothing was moved. ---
+
+    /**
+     * Other requests held the account longer than the lock timeout, or kept deadlocking with this one (ADR-0022). Not
+     * 409, which means "already done" here, so a client that treats 409 as done would drop a transfer that never
+     * happened. Not 429, which is for rate limiting.
+     */
+    @ExceptionHandler(AccountBusyException.class)
+    ResponseEntity<ProblemDetail> accountBusy(AccountBusyException e, HttpServletRequest request) {
+        // No stack trace: this is an expected condition under contention, not a bug. The request id is on the line.
+        log.warn("Gave up on an account in use by other requests: {}", e.getMessage());
+        ProblemDetail problem = problem(
+                request,
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "account-busy",
+                "Account busy",
+                "Other requests are using the same account right now. Nothing was moved. Retry after the Retry-After "
+                        + "delay, with the same Idempotency-Key.");
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(RETRY_AFTER_WHEN_BUSY.toSeconds()))
+                .body(problem);
     }
 
     // --- 400: malformed input, naming the fields at fault ---

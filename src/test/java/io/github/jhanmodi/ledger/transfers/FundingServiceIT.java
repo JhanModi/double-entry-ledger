@@ -1,10 +1,14 @@
 package io.github.jhanmodi.ledger.transfers;
 
+import static io.github.jhanmodi.ledger.DatabaseLocks.awaitASessionWaitingForALock;
+import static io.github.jhanmodi.ledger.DatabaseLocks.lockAccount;
 import static io.github.jhanmodi.ledger.money.CurrencyCode.EUR;
 import static io.github.jhanmodi.ledger.money.CurrencyCode.USD;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.github.jhanmodi.ledger.HeldTransaction;
 import io.github.jhanmodi.ledger.OwnerDatabase;
 import io.github.jhanmodi.ledger.TestcontainersConfiguration;
 import io.github.jhanmodi.ledger.clients.Caller;
@@ -25,6 +29,9 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -154,6 +161,39 @@ class FundingServiceIT {
                         DuplicateRequestException.class,
                         e -> assertThat(e.originalId()).isEqualTo(original.id().value()));
         assertThat(queries.balance(account).posted()).isEqualTo(usd(100));
+    }
+
+    @Test
+    void aFundingThatPostgresAbortsToBreakADeadlockIsRetriedAndFundsOnce() throws Exception {
+        IdempotencyKey key = key();
+        ExecutorService fundingThread = Executors.newSingleThreadExecutor();
+        try (HeldTransaction other = HeldTransaction.start(owner, sql -> lockAccount(sql, account))) {
+            // The funding has already read the fundings table (checking its idempotency key), which keeps a light lock
+            // on the table until its transaction ends. Now it waits for the account, which the other transaction holds.
+            Future<Funding> funding = fundingThread.submit(
+                    () -> fundings.fund(new FundingCommand(account, usd(100), "BANK-REF-7", key), admin));
+            awaitASessionWaitingForALock(owner);
+
+            // A funding only ever locks one account, so two fundings can't deadlock. A schema change can: the other
+            // transaction asks for the whole table, which waits for the funding, which waits for it. The funding has
+            // waited longer, so Postgres aborts it (SQLSTATE 40P01).
+            Future<Void> otherGetsTheTable = other.then(sql ->
+                    sql.sql("LOCK TABLE fundings IN ACCESS EXCLUSIVE MODE").update());
+            // Only the funding's rollback can free the table, so this completing proves the first attempt was aborted.
+            HeldTransaction.await(otherGetsTheTable);
+            other.rollback();
+
+            assertThat(funding.get(30, SECONDS).amount()).isEqualTo(usd(100));
+        } finally {
+            fundingThread.shutdownNow();
+        }
+        assertThat(queries.balance(account).posted()).isEqualTo(usd(100));
+        assertThat(jdbc.sql("SELECT count(*) FROM fundings WHERE client_id = :clientId AND idempotency_key = :key")
+                        .param("clientId", client.value())
+                        .param("key", key.value())
+                        .query(Long.class)
+                        .single())
+                .isOne();
     }
 
     /** The ledger entries behind a funding, as "DIRECTION account amount". */

@@ -116,6 +116,18 @@ class PostingServiceIT {
     }
 
     @Test
+    void aPostingBetweenSystemAccountsOnlyLocksNothingAndPosts() {
+        AccountId bank = ledger.bank(USD);
+        AccountId otherBank = ledger.bank(USD);
+
+        postingService.post(new PostingRequest(
+                LedgerTransactionType.TRANSFER, null, List.of(debit(bank, usd(250)), credit(otherBank, usd(250)))));
+
+        assertThat(queries.balance(bank).posted()).isEqualTo(usd(250));
+        assertThat(queries.balance(otherBank).posted()).isEqualTo(usd(-250));
+    }
+
+    @Test
     void anOverdraftIsRejectedAndLeavesNothingBehind() {
         AccountId alice = ledger.customer(USD);
         AccountId bob = ledger.customer(USD);
@@ -127,7 +139,8 @@ class PostingServiceIT {
                 .extracting(e -> ((InsufficientFundsException) e).accountId())
                 .isEqualTo(alice);
 
-        // The entries were inserted before the balance update failed. The whole posting rolled back, so they're gone.
+        // Rejected by the check under the lock, before anything was written (the CHECK constraint is only the
+        // backstop).
         assertThat(entryCount(alice, bob)).isEqualTo(entriesBefore);
         assertThat(queries.balance(alice).posted()).isEqualTo(usd(100));
         assertThat(queries.balance(bob).posted()).isEqualTo(usd(0));

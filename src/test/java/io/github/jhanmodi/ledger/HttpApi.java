@@ -59,7 +59,8 @@ public final class HttpApi {
                     response.headers().firstValue("Content-Type"),
                     response.headers().firstValue("Location"),
                     response.headers().firstValue("WWW-Authenticate"),
-                    response.headers().firstValue("X-Request-Id"));
+                    response.headers().firstValue("X-Request-Id"),
+                    response.headers().firstValue("Retry-After"));
         } catch (Exception e) {
             throw new IllegalStateException("HTTP call failed: " + method + " " + path, e);
         }
@@ -71,7 +72,8 @@ public final class HttpApi {
             Optional<String> contentType,
             Optional<String> location,
             Optional<String> wwwAuthenticate,
-            Optional<String> requestId) {
+            Optional<String> requestId,
+            Optional<String> retryAfter) {
 
         public JsonNode json() {
             return JsonMapper.shared().readTree(body);

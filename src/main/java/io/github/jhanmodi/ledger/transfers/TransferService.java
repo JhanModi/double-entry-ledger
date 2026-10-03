@@ -16,6 +16,7 @@ import io.github.jhanmodi.ledger.ledger.LedgerTransactionId;
 import io.github.jhanmodi.ledger.ledger.LedgerTransactionType;
 import io.github.jhanmodi.ledger.ledger.PostingRequest;
 import io.github.jhanmodi.ledger.ledger.PostingService;
+import io.github.jhanmodi.ledger.ledger.RetryingTransactions;
 import io.github.jhanmodi.ledger.money.CurrencyCode;
 import io.github.jhanmodi.ledger.money.Money;
 import io.github.jhanmodi.ledger.transfers.TransferAccountNotFoundException.Side;
@@ -30,7 +31,6 @@ import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Moves money between two accounts of the same client (ADR-0018). A transfer is one database transaction: the ledger
@@ -62,7 +62,7 @@ public class TransferService {
     private final LedgerQueries ledger;
     private final PostingService postings;
     private final AuditLog audit;
-    private final TransactionTemplate transactions;
+    private final RetryingTransactions transactions;
 
     public TransferService(
             JdbcClient jdbc,
@@ -74,18 +74,24 @@ public class TransferService {
         this.ledger = ledger;
         this.postings = postings;
         this.audit = audit;
-        this.transactions = new TransactionTemplate(transactionManager);
+        this.transactions = new RetryingTransactions(transactionManager);
     }
 
     /**
      * Moves the money, or throws and moves nothing.
      *
-     * <p>The transaction is started here with a {@link TransactionTemplate} rather than {@code @Transactional}, because
-     * one case needs work <em>after</em> it has rolled back: when another request with the same key wins the race, this
-     * one fails on the unique key, and only once this transaction is gone can the winner be looked up.
+     * <p>The transaction is started here rather than with {@code @Transactional}, for two reasons:
+     *
+     * <ul>
+     *   <li>If Postgres aborts it to break a deadlock, {@link RetryingTransactions} runs the whole transfer again
+     *       (ADR-0022).
+     *   <li>One case needs work <em>after</em> it has rolled back: when another request with the same key wins the race,
+     *       this one fails on the unique key, and only once this transaction is gone can the winner be looked up.
+     * </ul>
      *
      * @throws DuplicateRequestException this client already used the key
      * @throws TransferAccountNotFoundException either account isn't one of the caller's
+     * @throws io.github.jhanmodi.ledger.ledger.AccountBusyException another request held an account too long
      */
     public Transfer transfer(TransferCommand command, Caller caller) {
         caller.requireScope(Scope.WRITE);

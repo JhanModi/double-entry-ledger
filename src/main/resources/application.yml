@@ -15,6 +15,11 @@ spring:
     user: ${POSTGRES_USER}
     password: ${POSTGRES_PASSWORD}
 
+ledger:
+  # The longest a posting waits for another transaction's lock on an account before giving up with AccountBusyException
+  # (ADR-0022). Longer than Postgres's deadlock_timeout (1s), so a real deadlock is still detected as a deadlock.
+  lock-timeout: ${LEDGER_LOCK_TIMEOUT:2s}
+
 logging:
   pattern:
     # Spring Boot inserts this into its default log pattern. Every line written while serving a request starts with

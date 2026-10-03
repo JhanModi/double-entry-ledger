@@ -41,7 +41,7 @@ API client ──HTTPS + API key──▶ ┌───────────�
 | Module | Owns | Milestone |
 |---|---|---|
 | `money` | `Money`, currencies, rounding, allocation | M2 |
-| `ledger` | accounts, ledger transactions, entries, balances, invariant checker | M3a, M3b, M5 |
+| `ledger` | accounts, ledger transactions, entries, balances, invariant checker; account locking, the lock timeout, and deadlock retries (`RetryingTransactions`) | M3a, M3b, M5 |
 | `clients` | API clients, API keys, scopes, the `Caller` making a request | M4a |
 | `transfers` | transfers and fundings: instant movements, amount limits, interim idempotency keys | M4b |
 | `idempotency` | idempotency keys: claim, request hash, replay | M6 |
@@ -82,7 +82,7 @@ A transfer or funding row and its ledger transaction are written in one database
 
 ## 5. Key flows
 
-### 5.1 Transfer (built in M4b; changes in M5 and M6)
+### 5.1 Transfer (built in M4b and M5; changes in M6)
 
 **Before the transaction**, each step can answer the request on its own:
 1. `RequestIdFilter` gives the request its id (ADR-0021).
@@ -90,17 +90,23 @@ A transfer or funding row and its ledger transaction are written in one database
 3. The input is validated (400 `invalid-request`): the `Idempotency-Key` header, integer and positive amounts, known fields only, and description length.
 4. The command is built: two different accounts and an amount within the limit, or 422.
 
-**In one database transaction** at READ COMMITTED, started by `TransferService` with a `TransactionTemplate`:
+**In one database transaction** at READ COMMITTED, started by `TransferService` through `RetryingTransactions`:
 1. The service checks the `write` scope again (defense in depth).
 2. **Has this client used this idempotency key?** If so, the answer is 409 with the original's id, and nothing else happens. This comes first, so a retry is recognized even after the money has been spent.
 3. **Look up both accounts owner-scoped:** 404, naming `sourceAccountId` or `destinationAccountId`. Then check that both are in the amount's currency: 422.
-4. **Post the ledger transaction:** debit the source and credit the destination. The posting service applies balance deltas in ascending id order, and the `CHECK` backstop rejects an overdraft (422). A closed account is also 422.
+4. **Post the ledger transaction:** debit the source and credit the destination. The posting service ([ADR-0005](adr/0005-pessimistic-row-locking.md), [ADR-0022](adr/0022-lock-timeouts-retries-and-the-busy-response.md)):
+   1. sets a 2-second `lock_timeout` for the rest of the transaction;
+   2. locks both accounts in ascending id order (`FOR NO KEY UPDATE`), waiting its turn if another request holds one;
+   3. re-reads their status and balances under the lock, and rejects a closed account or an overdraft (422) before writing anything;
+   4. writes the entries and applies each balance change as a SQL delta.
+
+   If another request holds an account for over 2 seconds, the answer is 503 `account-busy`, and nothing has moved.
 5. **Insert the transfer row.** Its composite foreign keys re-check ownership and currency, and its unique key guards the idempotency key.
 6. **Write the audit row** (`TRANSFER_CREATED`), then commit.
 
 **If step 5 hits the unique key:** a duplicate request committed while this one was running. This transaction rolls back, the service looks up the winner, and the answer is 409 with its id ([ADR-0019](adr/0019-interim-idempotency-before-m6.md)).
 
-**M5 adds:** lock both accounts in id order and check funds before writing anything; `lock_timeout`; retries on deadlock ([ADR-0005](adr/0005-pessimistic-row-locking.md)).
+**If Postgres aborts the transaction to break a deadlock:** `RetryingTransactions` runs it again from step 1, up to 3 attempts in all, after a short random pause. If every attempt is aborted, the answer is 503 `account-busy`. A lock timeout is never retried ([ADR-0022](adr/0022-lock-timeouts-retries-and-the-busy-response.md)).
 
 **M6 replaces step 2:** claim the key first in `idempotency_keys`, hash the request, and replay the stored response ([ADR-0007](adr/0007-idempotency-in-the-business-transaction.md)).
 
@@ -154,8 +160,13 @@ These must hold at all times. The invariant checker verifies the ones that can b
 |---|---|---|---|
 | Client retries after a timeout | Money moves once. Until M6 the retry gets 409 with the original's id; from M6 the stored response is replayed | Unique key (ADR-0019), then ADR-0007 | M4b (`TransferServiceIT`, `FundingServiceIT`, `TransfersApiIT`); M6 |
 | The same request arrives twice at the same moment | One is applied, never both. The other gets 409, or until M6 possibly 422 if the first spent the money | `UNIQUE (client_id, idempotency_key)` | M4b (`TransferServiceIT`: a held-transaction race and an 8-way race) |
-| Two withdrawals race on one account | At most the available funds are spent | SQL delta plus `CHECK` (M4b); ordered locks (M5, ADR-0005) | M4b smoke test (`concurrentTransfersNeverOverdrawTheSource`); M5 full suite |
-| Opposite transfers A→B and B→A at once | No deadlock | ADR-0005 (lock order) | M5 |
+| Two withdrawals race on one account | At most the available funds are spent | Accounts locked, then funds checked under the lock (ADR-0005); SQL deltas; `CHECK` backstop | M5 (`ConcurrencyIT`, `BalanceChangesTest`, `BalanceChangesPropertiesTest`); M4b smoke test (`concurrentTransfersNeverOverdrawTheSource`) |
+| Opposite transfers A→B and B→A at once, or postings naming the same accounts in any order | No deadlock | Customer accounts locked in ascending id order, in one statement (ADR-0005) | M5 (`ConcurrencyIT`, run without retries; `PostingLocksIT` proves the order) |
+| An account is closed while a transfer waits for its lock | The transfer is rejected (422 `account-closed`); nothing moves. (Before M5, the transfer credited the closed account.) | Status re-read under the lock | M5 (`PostingLocksIT`) |
+| Something holds an account's lock for a long time (a slow transaction, a forgotten `psql` session) | Requests for that account give up after 2 seconds with 503 `account-busy`, and nothing moves. Other accounts are unaffected | `lock_timeout` per transaction (ADR-0022) | M5 (`PostingLocksIT`, `TransfersApiIT`) |
+| Postgres aborts a transfer or funding to break a deadlock | It's retried, and the money moves once. 503 if all 3 attempts are aborted | `RetryingTransactions` (ADR-0022) | M5 (`TransferServiceIT`, `FundingServiceIT`: real forced deadlocks; `RetryingTransactionsTest`) |
+| A thousand transfers and fundings, with overdraws and repeated keys, hit four accounts at once | Every balance equals what the successful requests add up to; every success has its row and audit row; the invariant checker is clean every time it looks, during the load and after | All of the above | M5 (`ConcurrencyIT`) |
+| A bug breaks the funds check under the lock | The `CHECK` constraint still refuses the overdraft. Its error is deliberately not translated, so the bug surfaces as a 500 instead of passing for a routine 422 | `CHECK` backstop | M5 planted-bug check; `LedgerSchemaIT` |
 | Server crashes mid-transfer | Transaction rolls back; nothing half-applied | Single DB transaction | M3a (`PostingServiceIT`: a failed posting leaves no entries) |
 | A posting would overdraw a customer | Rejected; the whole posting rolls back | `CHECK` backstop, translated to `InsufficientFundsException` | M3a (`PostingServiceIT`, `RandomPostingsIT`) |
 | Code (or a person) writes ledger rows by hand, skipping Java's checks | Unbalanced, empty, non-positive, or wrong-currency writes are rejected; edits and deletes are rejected | Constraints and triggers in V2 | M3a (`LedgerSchemaIT`) |
@@ -236,6 +247,7 @@ Every error is RFC 9457 Problem Details (`application/problem+json`) with a `req
 | 422 | `/problems/account-closed` | A closed account would send or receive | |
 | 422 | `/problems/amount-too-large` | Above the currency's limit (§10) | `maximum` |
 | 500 | `/problems/internal-error` | Anything unexpected; logged on the server | |
+| 503 | `/problems/account-busy` | Other requests held the account for longer than the 2-second lock timeout, or kept deadlocking with this one (ADR-0022). Nothing moved; retrying with the same `Idempotency-Key` is safe | `Retry-After: 1` header |
 
 ### Database trust model (M3b, [ADR-0015](adr/0015-least-privilege-database-roles.md))
 
@@ -256,6 +268,12 @@ Strategy: unit, property-based, integration against real Postgres, concurrency, 
 - **Integration tests** (`*IT`, Failsafe, `./mvnw verify`): boot the real application against `postgres:18` in Docker through Testcontainers. `@ServiceConnection` points the datasource at the container. The Spring test context is cached, so test classes with the same configuration share one container.
 - **First coverage** (`ApplicationIT`, M1): the health endpoint is UP; Actuator endpoints other than `health` are unreachable (401 without a key since M4a); Flyway created and seeded `currencies`.
 - **Race tests without sleeps** (M4b, `TransferServiceIT`): to force a specific interleaving, a test holds one transaction open and waits until Postgres reports (`pg_locks`) that the other is blocked, then lets the first commit. Threads start together on a latch.
+- **Concurrency tests** (M5; primer 05):
+  - **Test helpers:** `HeldTransaction` holds an owner transaction open on its own thread and can be handed a next step. `DatabaseLocks` waits for a session blocked on a lock, takes an account's lock, and probes a lock with `NOWAIT`.
+  - **Locking** (`PostingLocksIT`): lock order, a status change while a posting waits, the lock timeout, and system accounts never locked.
+  - **Real deadlocks, forced** (`TransferServiceIT`, `FundingServiceIT`): the test's transaction and the service wait for each other. The service has waited longer, so Postgres aborts it, and the retry succeeds.
+  - **The suite** (`ConcurrencyIT`): 1,000 mixed requests on four accounts with the invariant checker running throughout; and postings naming the same accounts in every order, straight through the posting service, so a deadlock couldn't be hidden by a retry.
+  - **Each layer on its own:** the Java funds check (`BalanceChangesTest`), the `CHECK` backstop (`LedgerSchemaIT`), lock order without retries (`ConcurrencyIT`), and retries without a database (`RetryingTransactionsTest`).
 - **Planted-bug checks:** at the end of each checkpoint, bugs are planted in a scratchpad copy of the code to confirm the tests catch them. The roadmap records each run.
 - **CI** (`.github/workflows/ci.yml`): `./mvnw verify` on Temurin 25, plus a gitleaks scan of the full git history.
 
