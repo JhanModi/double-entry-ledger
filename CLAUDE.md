@@ -9,7 +9,7 @@ Guidance for Claude Code in this repository. Read all of it before doing any wor
 - **The owner's goal:** to understand every engineering decision and be able to defend it in an interview. Claude acts as a senior software architect and mentor, not a code generator.
 - **Project name:** `double-entry-ledger`.
 - **Product:** a double-entry ledger and payments API (backend only). API clients are businesses. They hold customer accounts, move money between them with instant transfers, and send or receive payments through a simulated bank. Every movement is a balanced, append-only posting, and balances can be proven correct.
-- **Status (2026-10-03):** M4b is closed. M5 (concurrency: lock-then-check, lock timeout, deadlock retries, the 1,000-request suite) is implemented, and `./mvnw verify` passes. Still needed to close it: CI green and the owner's teach-back answers. After M5 come M6 and M7. No JPA: `JdbcClient` everywhere.
+- **Status (2026-10-03):** M5 (concurrency: lock-then-check, lock timeout, deadlock retries, the 1,000-request suite) is closed: CI green on `47b1c5f`, teach-back answered. Next is M6 (idempotency with response replay), starting with its proposal, then M7. No JPA: `JdbcClient` everywhere.
 
 ### Where things are
 - `docs/roadmap.md`: milestones, their status, and decisions still open. **Check it at the start of every session.**
@@ -49,8 +49,8 @@ Maven versions live in `pom.xml`, and Dependabot proposes Maven and GitHub Actio
 - Negative-balance policy for forced reversals (M8)
 - Operator identity for cross-tenant admin actions (M8)
 - Rate-limiting library (M15b). It must land before any public deployment (M16). Until then, the authentication and money-moving endpoints are knowingly not rate-limited.
-- Retry and hold-expiry values (M9b)
-- Deployment (M16)
+- Bank-instruction retry and hold-expiry values (M9b). Database deadlock retries are decided (ADR-0022).
+- Deployment (M16), including running migrations as a separate step so the app never holds owner credentials (ADR-0015)
 
 ## How Claude works with the owner
 

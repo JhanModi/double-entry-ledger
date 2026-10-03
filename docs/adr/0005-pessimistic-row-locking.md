@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-10-01
+- **Corrected:** 2026-10-03, at the owner's request: the backstop constraint is described as it exists. It has no `allow_negative` column; whether one is needed belongs to the negative-balance decision planned for M8. The decision is unchanged.
 
 ## Context
 Two concurrent withdrawals of 80 from a balance of 100 can both read 100, both pass the funds check, and leave the balance at −60. The design must make this impossible, including when 1,000 requests hit one account at once.
@@ -18,7 +19,8 @@ Two concurrent withdrawals of 80 from a balance of 100 can both read 100, both p
 - **Re-read balances after locking**, and do the funds check on the locked values.
 - **`SET LOCAL lock_timeout`**, so a waiting request fails fast (SQLSTATE `55P03`) instead of hanging. It returns a retryable error to the client.
 - **Retry the whole transaction**, a bounded number of times, on deadlock (`40P01`) or serialization failure (`40001`).
-- **Backstop constraint:** `CHECK (allow_negative OR posted_balance - held_balance >= 0)`. Even buggy code can't overdraw an account.
+- **Backstop constraint:** `CHECK (posted_balance - held_balance >= 0)` (`accounts_available_balance_non_negative`). Even buggy code can't overdraw a customer account. System accounts have no cached balance, so the check doesn't apply to them, and they may go negative.
+  - Whether some postings, such as a forced reversal, may take a customer account below zero (an `allow_negative` flag, for example) is the negative-balance decision planned for M8.
 - **Isolation level:** READ COMMITTED.
 - **No network calls** inside these transactions.
 

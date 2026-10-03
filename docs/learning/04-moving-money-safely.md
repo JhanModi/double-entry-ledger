@@ -27,7 +27,7 @@ If anything fails part way, such as insufficient funds or a duplicate key, the *
 - **Propagation** says what to do if a transaction is already open:
   - `REQUIRED` (the default) joins it, or starts one if there's none.
   - `MANDATORY` throws if there's none. `AuditLog.record` uses it, so an audit row can never be written separately from its action.
-- **`TransactionTemplate`** runs a block in a transaction, in code rather than by annotation. `TransferService` uses it because one case needs code that runs *after* the rollback: looking up the request that won a race.
+- **`TransactionTemplate`** runs a block in a transaction, in code rather than by annotation. `TransferService` uses it because one case needs code that runs *after* the rollback: looking up the request that won a race. (Since M5 it's wrapped in `RetryingTransactions`, which also retries a deadlocked transaction; see primer 05.)
 
 ---
 

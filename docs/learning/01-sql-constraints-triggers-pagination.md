@@ -18,7 +18,7 @@ A constraint is a rule the database checks on every write, whichever program doe
 
 **A composite foreign key** points at two columns at once. `entries (account_id, currency) REFERENCES accounts (id, currency)` means an entry's currency must be the same as its account's currency. A plain foreign key on `account_id` alone couldn't express that.
 
-**Name your constraints.** When `CONSTRAINT accounts_available_balance_non_negative CHECK (...)` is violated, its name appears in the error message. `PostingService` relies on this to turn an overdraft into an `InsufficientFundsException`. Unnamed constraints get generated names like `entries_amount_check`.
+**Name your constraints.** When `CONSTRAINT accounts_available_balance_non_negative CHECK (...)` is violated, its name appears in the error message, so the log says exactly which rule was broken. Unnamed constraints get generated names like `entries_amount_check`. (Until M5, `PostingService` matched this name to turn an overdraft into an `InsufficientFundsException`. Since M5 it checks funds itself, under the lock, so this constraint firing means a bug, and its error is left as a 500. See primer 05.)
 
 ---
 
