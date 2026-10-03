@@ -8,6 +8,11 @@ import io.github.jhanmodi.ledger.audit.AuditLog;
 import io.github.jhanmodi.ledger.clients.Caller;
 import io.github.jhanmodi.ledger.clients.ClientId;
 import io.github.jhanmodi.ledger.clients.Scope;
+import io.github.jhanmodi.ledger.idempotency.Claim;
+import io.github.jhanmodi.ledger.idempotency.IdempotencyKey;
+import io.github.jhanmodi.ledger.idempotency.IdempotencyKeys;
+import io.github.jhanmodi.ledger.idempotency.IdempotentOperation;
+import io.github.jhanmodi.ledger.idempotency.IdempotentResult;
 import io.github.jhanmodi.ledger.ledger.Account;
 import io.github.jhanmodi.ledger.ledger.AccountId;
 import io.github.jhanmodi.ledger.ledger.AccountNotFoundException;
@@ -26,6 +31,8 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -33,14 +40,16 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 
 /**
- * Moves money between two accounts of the same client (ADR-0018). A transfer is one database transaction: the ledger
- * posting, the transfer row, and the audit row are all committed, or none are.
+ * Moves money between two accounts of the same client (ADR-0018). A transfer is one database transaction: the
+ * idempotency key's claim, the ledger posting, the transfer row, and the audit row are all committed, or none are.
  *
- * <p>Retries are guarded by the client's idempotency key (ADR-0019). Until M6, a duplicate is rejected with the
- * original's id rather than replayed.
+ * <p>The key is claimed first (ADR-0023). A retry of the same request gets the original transfer back, and nothing
+ * moves again; the same key with a different request is refused.
  */
 @Service
 public class TransferService {
+
+    private static final Logger log = LoggerFactory.getLogger(TransferService.class);
 
     private static final String IDEMPOTENCY_KEY_CONSTRAINT = "transfers_client_idempotency_key_key";
 
@@ -59,6 +68,7 @@ public class TransferService {
             rs.getObject("created_at", OffsetDateTime.class).toInstant());
 
     private final JdbcClient jdbc;
+    private final IdempotencyKeys idempotencyKeys;
     private final LedgerQueries ledger;
     private final PostingService postings;
     private final AuditLog audit;
@@ -66,11 +76,13 @@ public class TransferService {
 
     public TransferService(
             JdbcClient jdbc,
+            IdempotencyKeys idempotencyKeys,
             LedgerQueries ledger,
             PostingService postings,
             AuditLog audit,
             PlatformTransactionManager transactionManager) {
         this.jdbc = jdbc;
+        this.idempotencyKeys = idempotencyKeys;
         this.ledger = ledger;
         this.postings = postings;
         this.audit = audit;
@@ -78,22 +90,28 @@ public class TransferService {
     }
 
     /**
-     * Moves the money, or throws and moves nothing.
+     * Moves the money, or replays the transfer an earlier request with the same key and body made, or throws and moves
+     * nothing.
      *
      * <p>The transaction is started here rather than with {@code @Transactional}, for two reasons:
      *
      * <ul>
      *   <li>If Postgres aborts it to break a deadlock, {@link RetryingTransactions} runs the whole transfer again
-     *       (ADR-0022).
-     *   <li>One case needs work <em>after</em> it has rolled back: when another request with the same key wins the race,
-     *       this one fails on the unique key, and only once this transaction is gone can the winner be looked up.
+     *       (ADR-0022), claim included.
+     *   <li>One case needs work <em>after</em> it has rolled back: if a duplicate ever got past the claim (see
+     *       {@link #transferOnce}), it fails on the transfer row's unique key, and only once this transaction is gone can
+     *       the original be looked up.
      * </ul>
      *
-     * @throws DuplicateRequestException this client already used the key
+     * @throws io.github.jhanmodi.ledger.idempotency.IdempotencyKeyReusedException the key was used for a different
+     *     request
+     * @throws io.github.jhanmodi.ledger.idempotency.RequestInProgressException another request with the key was still
+     *     running after the lock timeout
+     * @throws DuplicateRequestException the key's claim has expired, but a transfer with the key exists
      * @throws TransferAccountNotFoundException either account isn't one of the caller's
      * @throws io.github.jhanmodi.ledger.ledger.AccountBusyException another request held an account too long
      */
-    public Transfer transfer(TransferCommand command, Caller caller) {
+    public IdempotentResult<Transfer> transfer(TransferCommand command, Caller caller) {
         caller.requireScope(Scope.WRITE);
         try {
             return transactions.execute(status -> transferOnce(command, caller));
@@ -101,9 +119,10 @@ public class TransferService {
             if (!violates(e, IDEMPOTENCY_KEY_CONSTRAINT)) {
                 throw e;
             }
-            // A request with the same key committed while this one was running. This transaction has rolled back,
-            // nothing it did remains, and the winner's row is now visible.
-            UUID original = findIdByKey(caller.clientId(), command.idempotencyKey())
+            // The permanent backstop: a request with the same key committed while this one was running. This
+            // transaction has rolled back, nothing it did remains, and the winner's row is now visible.
+            UUID original = findByKey(caller.clientId(), command.idempotencyKey())
+                    .map(transfer -> transfer.id().value())
                     .orElseThrow(() -> new IllegalStateException("unique key violated, but no original found", e));
             throw new DuplicateRequestException(original);
         }
@@ -119,12 +138,24 @@ public class TransferService {
                 .orElseThrow(() -> new TransferNotFoundException(id));
     }
 
-    private Transfer transferOnce(TransferCommand command, Caller caller) {
-        // First, so a retry is recognised even if something else has changed since (e.g. the money has been spent).
-        Optional<UUID> original = findIdByKey(caller.clientId(), command.idempotencyKey());
-        if (original.isPresent()) {
-            throw new DuplicateRequestException(original.get());
+    private IdempotentResult<Transfer> transferOnce(TransferCommand command, Caller caller) {
+        // First, before anything else: a retry is recognised even if something has changed since (e.g. the money has
+        // been spent), and a duplicate arriving at the same time waits here, before it touches any account.
+        Claim claim = idempotencyKeys.claim(
+                caller.clientId(), command.idempotencyKey(), IdempotentOperation.TRANSFER, command.fingerprint());
+        if (claim == Claim.REPEAT) {
+            Transfer original = findByKey(caller.clientId(), command.idempotencyKey())
+                    .orElseThrow(() -> new IllegalStateException("a committed transfer claim has no transfer"));
+            log.info("Replayed transfer {} for a repeated Idempotency-Key", original.id());
+            return IdempotentResult.replay(original);
         }
+        // A new claim, yet a transfer may already have this key: one whose claim expired and was deleted (ADR-0023).
+        // The transfer row keeps its key for good, so such a late retry is refused before any money moves.
+        Optional<Transfer> expired = findByKey(caller.clientId(), command.idempotencyKey());
+        if (expired.isPresent()) {
+            throw new DuplicateRequestException(expired.get().id().value());
+        }
+
         Account source = owned(caller.clientId(), command.source(), Side.SOURCE);
         Account destination = owned(caller.clientId(), command.destination(), Side.DESTINATION);
         requireCurrency(source, command.amount());
@@ -138,7 +169,7 @@ public class TransferService {
                 List.of(debit(source.id(), command.amount()), credit(destination.id(), command.amount()))));
         Transfer transfer = insert(command, caller, posted);
         audit.record(AuditAction.TRANSFER_CREATED, transfer.id().toString(), caller.auditActor());
-        return transfer;
+        return IdempotentResult.firstTime(transfer);
     }
 
     private Account owned(ClientId client, AccountId id, Side side) {
@@ -175,11 +206,11 @@ public class TransferService {
                 .single();
     }
 
-    private Optional<UUID> findIdByKey(ClientId client, IdempotencyKey key) {
-        return jdbc.sql("SELECT id FROM transfers WHERE client_id = :clientId AND idempotency_key = :key")
+    private Optional<Transfer> findByKey(ClientId client, IdempotencyKey key) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM transfers WHERE client_id = :clientId AND idempotency_key = :key")
                 .param("clientId", client.value())
                 .param("key", key.value())
-                .query(UUID.class)
+                .query(TRANSFER)
                 .optional();
     }
 

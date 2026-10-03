@@ -16,6 +16,10 @@ import io.github.jhanmodi.ledger.clients.ClientId;
 import io.github.jhanmodi.ledger.clients.ClientService;
 import io.github.jhanmodi.ledger.clients.Scope;
 import io.github.jhanmodi.ledger.clients.ScopeRequiredException;
+import io.github.jhanmodi.ledger.idempotency.IdempotencyKey;
+import io.github.jhanmodi.ledger.idempotency.IdempotencyKeyReusedException;
+import io.github.jhanmodi.ledger.idempotency.IdempotentResult;
+import io.github.jhanmodi.ledger.idempotency.RequestInProgressException;
 import io.github.jhanmodi.ledger.ledger.AccountClosedException;
 import io.github.jhanmodi.ledger.ledger.AccountId;
 import io.github.jhanmodi.ledger.ledger.AccountPurpose;
@@ -40,6 +44,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.function.IntFunction;
 import java.util.stream.Stream;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -50,9 +55,9 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * Transfers against a real database: money moves, every rejection moves and records nothing, a retry never moves money
- * twice (ADR-0019), concurrent transfers never overdraw an account, and a transfer aborted to break a deadlock is retried
- * (ADR-0022). The full concurrency suite is ConcurrencyIT.
+ * Transfers against a real database: money moves, every rejection moves and records nothing, a retry replays the
+ * original and never moves money twice (ADR-0023), concurrent transfers never overdraw an account, and a transfer
+ * aborted to break a deadlock is retried (ADR-0022). The full concurrency suite is ConcurrencyIT.
  *
  * <p>Alice's business owns the accounts. Each test starts her main USD account with 10.00 USD.
  */
@@ -93,6 +98,7 @@ class TransferServiceIT {
     ClientId alice;
     AccountId main;
     AccountId savings;
+    ExecutorService secondRequest;
 
     @BeforeEach
     void setUp() {
@@ -101,6 +107,12 @@ class TransferServiceIT {
         main = ledger.customer(USD);
         savings = ledger.customer(USD);
         ledger.fund(ledger.bank(USD), main, usd(1000));
+        secondRequest = Executors.newSingleThreadExecutor();
+    }
+
+    @AfterEach
+    void tearDown() {
+        secondRequest.shutdownNow();
     }
 
     // --- Moving money ---
@@ -110,8 +122,11 @@ class TransferServiceIT {
         Caller caller = ledger.caller(alice);
         IdempotencyKey key = key();
 
-        Transfer transfer = transfers.transfer(new TransferCommand(main, savings, usd(300), "rent", key), caller);
+        IdempotentResult<Transfer> result =
+                transfers.transfer(new TransferCommand(main, savings, usd(300), "rent", key), caller);
 
+        Transfer transfer = result.value();
+        assertThat(result.replayed()).isFalse();
         assertThat(balance(main)).isEqualTo(usd(700));
         assertThat(balance(savings)).isEqualTo(usd(300));
         assertThat(transfer.source()).isEqualTo(main);
@@ -122,17 +137,20 @@ class TransferServiceIT {
         assertThat(entries(transfer)).containsExactlyInAnyOrder("DEBIT " + main + " 300", "CREDIT " + savings + " 300");
         assertThat(transfers.find(alice, transfer.id())).isEqualTo(transfer);
         assertThat(auditedIn(caller)).containsExactly("TRANSFER_CREATED " + transfer.id());
+        assertThat(claimsFor(key)).containsExactly("TRANSFER");
     }
 
     @Test
     void theDescriptionIsOptional() {
-        Transfer transfer = transfers.transfer(new TransferCommand(main, savings, usd(1), null, key()), caller());
+        Transfer transfer = transfers
+                .transfer(new TransferCommand(main, savings, usd(1), null, key()), caller())
+                .value();
 
         assertThat(transfer.description()).isNull();
         assertThat(balance(savings)).isEqualTo(usd(1));
     }
 
-    // --- Rejected: nothing moves, and nothing is recorded ---
+    // --- Rejected: nothing moves, nothing is recorded, and the key stays free ---
 
     @Test
     void anInsufficientBalanceMovesNothingAndRecordsNothing() {
@@ -146,6 +164,7 @@ class TransferServiceIT {
         assertThat(balance(savings)).isEqualTo(usd(0));
         assertThat(transfersWithKey(key)).isZero();
         assertThat(auditedIn(caller)).isEmpty();
+        assertThat(claimsFor(key)).as("the claim rolled back with the rest").isEmpty();
     }
 
     @Test
@@ -190,97 +209,193 @@ class TransferServiceIT {
     @Test
     void aKeyWithoutTheWriteScopeCannotTransfer() {
         Caller readOnly = ledger.caller(alice, EnumSet.of(Scope.READ));
+        IdempotencyKey key = key();
 
-        assertThatThrownBy(
-                        () -> transfers.transfer(new TransferCommand(main, savings, usd(100), null, key()), readOnly))
+        assertThatThrownBy(() -> transfers.transfer(new TransferCommand(main, savings, usd(100), null, key), readOnly))
                 .isInstanceOf(ScopeRequiredException.class);
         assertThat(balance(main)).isEqualTo(usd(1000));
+        assertThat(claimsFor(key)).as("refused before the key was claimed").isEmpty();
     }
 
-    // --- Retries (ADR-0019) ---
+    // --- Retries, one after another (ADR-0023) ---
 
     @Test
-    void theSameKeyTwiceMovesTheMoneyOnce() {
+    void aRetryOfTheSameRequestReplaysTheOriginalAndMovesNothing() {
         IdempotencyKey key = key();
-        Transfer original = transfers.transfer(new TransferCommand(main, savings, usd(300), "first", key), caller());
+        Transfer original = transfers
+                .transfer(new TransferCommand(main, savings, usd(300), "rent", key), caller())
+                .value();
+        Caller retrying = caller();
 
-        // A retry, even one with a different body, is refused and points at the original. (M6 makes a different body a
-        // 422 and replays an identical one.)
-        assertThatThrownBy(
-                        () -> transfers.transfer(new TransferCommand(main, savings, usd(500), "retry", key), caller()))
+        IdempotentResult<Transfer> retry =
+                transfers.transfer(new TransferCommand(main, savings, usd(300), "rent", key), retrying);
+
+        assertThat(retry.replayed()).isTrue();
+        assertThat(retry.value()).isEqualTo(original);
+        assertThat(balance(main)).isEqualTo(usd(700));
+        assertThat(transfersWithKey(key)).isOne();
+        assertThat(auditedIn(retrying))
+                .as("a replay does nothing, so there's nothing to audit")
+                .isEmpty();
+    }
+
+    @Test
+    void aRetryIsReplayedEvenAfterTheMoneyIsSpent() {
+        IdempotencyKey key = key();
+        Transfer original = transfers
+                .transfer(new TransferCommand(main, savings, usd(1000), null, key), caller())
+                .value();
+
+        // The key is claimed before anything else, so the retry gets the original, not "insufficient funds".
+        IdempotentResult<Transfer> retry =
+                transfers.transfer(new TransferCommand(main, savings, usd(1000), null, key), caller());
+
+        assertThat(retry.replayed()).isTrue();
+        assertThat(retry.value()).isEqualTo(original);
+    }
+
+    @Test
+    void theSameKeyWithADifferentRequestIsRefusedAndMovesNothing() {
+        IdempotencyKey key = key();
+        transfers.transfer(new TransferCommand(main, savings, usd(300), "rent", key), caller());
+        Caller reusing = caller();
+
+        assertThatThrownBy(() -> transfers.transfer(new TransferCommand(main, savings, usd(500), "rent", key), reusing))
+                .isInstanceOf(IdempotencyKeyReusedException.class);
+        assertThatThrownBy(() -> transfers.transfer(new TransferCommand(main, savings, usd(300), "food", key), reusing))
+                .isInstanceOf(IdempotencyKeyReusedException.class);
+        assertThat(balance(main)).isEqualTo(usd(700));
+        assertThat(transfersWithKey(key)).isOne();
+        assertThat(auditedIn(reusing)).isEmpty();
+    }
+
+    @Test
+    void aFailedRequestLeavesTheKeyFreeSoARetryRunsAgain() {
+        IdempotencyKey key = key();
+        TransferCommand command = new TransferCommand(main, savings, usd(1500), null, key);
+        assertThatThrownBy(() -> transfers.transfer(command, caller())).isInstanceOf(InsufficientFundsException.class);
+
+        // Only successes are remembered (ADR-0023, D1): once the money is there, the same request goes through.
+        ledger.fund(ledger.bank(USD), main, usd(500));
+        IdempotentResult<Transfer> retry = transfers.transfer(command, caller());
+
+        assertThat(retry.replayed()).isFalse();
+        assertThat(balance(main)).isEqualTo(usd(0));
+        assertThat(balance(savings)).isEqualTo(usd(1500));
+    }
+
+    @Test
+    void aRetryAfterItsClaimWasDeletedIsRefusedWithTheOriginalsIdAndMovesNothing() {
+        IdempotencyKey key = key();
+        Transfer original = transfers
+                .transfer(new TransferCommand(main, savings, usd(1000), null, key), caller())
+                .value();
+        // What the cleanup does once the claim has expired (ADR-0023, D5).
+        deleteClaim(key);
+
+        // The transfer row still has the key, and it's checked before any money moves. The money is spent, so a retry
+        // that skipped that check would be refused as "insufficient funds" instead, and the client would never learn
+        // that its transfer had in fact gone through.
+        assertThatThrownBy(() -> transfers.transfer(new TransferCommand(main, savings, usd(1000), null, key), caller()))
                 .isInstanceOfSatisfying(
                         DuplicateRequestException.class,
                         e -> assertThat(e.originalId()).isEqualTo(original.id().value()));
-        assertThat(balance(main)).isEqualTo(usd(700));
+        assertThat(balance(main)).isEqualTo(usd(0));
         assertThat(transfersWithKey(key)).isOne();
+        assertThat(claimsFor(key)).as("the refused retry's claim rolled back").isEmpty();
     }
 
     @Test
-    void aRetryIsRecognisedEvenAfterTheMoneyIsSpent() {
+    void anotherClientsRequestWithTheSameKeyIsItsOwnAndNeverSeesThisOne() {
         IdempotencyKey key = key();
-        transfers.transfer(new TransferCommand(main, savings, usd(1000), null, key), caller());
+        Transfer alices = transfers
+                .transfer(new TransferCommand(main, savings, usd(300), null, key), caller())
+                .value();
+        ClientId bob = clientService.createClient("bob");
+        AccountId bobsMain = ledger.customer(bob, USD);
+        AccountId bobsSavings = ledger.customer(bob, USD);
+        ledger.fund(ledger.bank(USD), bobsMain, usd(500));
 
-        // The key is checked before anything else, so the retry gets "duplicate", not "insufficient funds".
-        assertThatThrownBy(() -> transfers.transfer(new TransferCommand(main, savings, usd(1000), null, key), caller()))
-                .isInstanceOf(DuplicateRequestException.class);
+        // Bob's key is his own: his transfer is carried out, and nothing of Alice's is replayed or named.
+        IdempotentResult<Transfer> bobs =
+                transfers.transfer(new TransferCommand(bobsMain, bobsSavings, usd(300), null, key), ledger.caller(bob));
+
+        assertThat(bobs.replayed()).isFalse();
+        assertThat(bobs.value().id()).isNotEqualTo(alices.id());
+        assertThat(balance(bobsSavings)).isEqualTo(usd(300));
+        assertThat(balance(savings)).isEqualTo(usd(300));
     }
 
-    @Test
-    void aDuplicateThatLosesTheRaceIsStoppedByTheUniqueKeyAndNeverApplied() throws Exception {
-        IdempotencyKey key = key();
-        Caller firstCaller = caller();
-        Caller secondCaller = caller();
-        CountDownLatch firstHasMovedTheMoney = new CountDownLatch(1);
-        CountDownLatch commitTheFirst = new CountDownLatch(1);
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        try {
-            // The first request moves the money inside a transaction this test holds open, so it isn't committed yet.
-            Future<Transfer> first = pool.submit(() -> new TransactionTemplate(transactionManager).execute(status -> {
-                Transfer transfer =
-                        transfers.transfer(new TransferCommand(main, savings, usd(100), null, key), firstCaller);
-                firstHasMovedTheMoney.countDown();
-                awaitUninterruptibly(commitTheFirst);
-                return transfer;
-            }));
-            assertThat(firstHasMovedTheMoney.await(WAIT_LIMIT.toSeconds(), SECONDS))
-                    .isTrue();
+    // --- The same key, at the same time ---
 
-            // The second can't see the first's uncommitted row, so it passes the key check, starts posting, and then
-            // has to wait for the first's lock on the balances.
-            Future<Transfer> second = pool.submit(
-                    () -> transfers.transfer(new TransferCommand(main, savings, usd(100), null, key), secondCaller));
+    @Test
+    void aDuplicateWaitsForTheFirstAndReplaysItOnceItCommits() throws Exception {
+        IdempotencyKey key = key();
+        try (HeldTransfer first = new HeldTransfer(new TransferCommand(main, savings, usd(100), null, key))) {
+            // The second waits on the first's uncommitted claim, before it touches any account.
+            Future<IdempotentResult<Transfer>> second = secondRequest.submit(
+                    () -> transfers.transfer(new TransferCommand(main, savings, usd(100), null, key), caller()));
             awaitASessionWaitingForALock(owner);
-            commitTheFirst.countDown();
 
-            // Once the first commits, the second's insert hits the unique key, rolls back, and reports the original.
-            Transfer original = first.get(WAIT_LIMIT.toSeconds(), SECONDS);
-            assertThatThrownBy(() -> second.get(WAIT_LIMIT.toSeconds(), SECONDS))
-                    .isInstanceOf(ExecutionException.class)
-                    .cause()
-                    .isInstanceOfSatisfying(
-                            DuplicateRequestException.class,
-                            e -> assertThat(e.originalId())
-                                    .isEqualTo(original.id().value()));
-        } finally {
-            pool.shutdownNow();
+            Transfer original = first.commit().value();
+
+            IdempotentResult<Transfer> duplicate = second.get(WAIT_LIMIT.toSeconds(), SECONDS);
+            assertThat(duplicate.replayed()).isTrue();
+            assertThat(duplicate.value()).isEqualTo(original);
         }
         assertThat(balance(main)).isEqualTo(usd(900));
         assertThat(transfersWithKey(key)).isOne();
     }
 
     @Test
-    void identicalRequestsSentAtOnceMoveTheMoneyOnce() throws Exception {
+    void aDuplicateWaitingForAFirstThatFailsCarriesTheRequestOutItself() throws Exception {
+        IdempotencyKey key = key();
+        try (HeldTransfer first = new HeldTransfer(new TransferCommand(main, savings, usd(100), null, key))) {
+            Future<IdempotentResult<Transfer>> second = secondRequest.submit(
+                    () -> transfers.transfer(new TransferCommand(main, savings, usd(100), null, key), caller()));
+            awaitASessionWaitingForALock(owner);
+
+            // The first rolls back, releasing its claim: as if it had failed after claiming the key.
+            first.rollBack();
+
+            IdempotentResult<Transfer> duplicate = second.get(WAIT_LIMIT.toSeconds(), SECONDS);
+            assertThat(duplicate.replayed()).isFalse();
+        }
+        assertThat(balance(main)).isEqualTo(usd(900));
+        assertThat(transfersWithKey(key)).isOne();
+    }
+
+    @Test
+    void aDuplicateStillWaitingAfterTheLockTimeoutIsRefusedAsInProgress() throws Exception {
+        IdempotencyKey key = key();
+        try (HeldTransfer first = new HeldTransfer(new TransferCommand(main, savings, usd(100), null, key))) {
+            Future<IdempotentResult<Transfer>> second = secondRequest.submit(
+                    () -> transfers.transfer(new TransferCommand(main, savings, usd(100), null, key), caller()));
+
+            // The first is held for longer than the 2-second lock timeout. The second gives up, through the retry
+            // layer, as "in progress": not as a busy account, which would send the client the wrong message.
+            assertThatThrownBy(() -> second.get(WAIT_LIMIT.toSeconds(), SECONDS))
+                    .isInstanceOf(ExecutionException.class)
+                    .cause()
+                    .isInstanceOf(RequestInProgressException.class);
+
+            first.commit();
+        }
+        assertThat(balance(main)).isEqualTo(usd(900));
+        assertThat(transfersWithKey(key)).isOne();
+    }
+
+    @Test
+    void identicalRequestsSentAtOnceMoveTheMoneyOnceAndAllGetTheSameTransfer() throws Exception {
         IdempotencyKey key = key();
 
         List<Object> outcomes =
                 runAtOnce(8, i -> transferCall(new TransferCommand(main, savings, usd(100), null, key), caller()));
 
-        List<Transfer> succeeded = ofType(outcomes, Transfer.class);
-        assertThat(succeeded).hasSize(1);
-        assertThat(ofType(outcomes, DuplicateRequestException.class))
-                .hasSize(7)
-                .allSatisfy(e -> assertThat(e.originalId())
-                        .isEqualTo(succeeded.getFirst().id().value()));
+        List<IdempotentResult<?>> results = results(outcomes);
+        assertThat(results).as("every request got the transfer: %s", outcomes).hasSize(8);
+        assertThat(results.stream().filter(result -> !result.replayed())).hasSize(1);
+        assertThat(results.stream().map(IdempotentResult::value).distinct()).hasSize(1);
         assertThat(balance(main)).isEqualTo(usd(900));
         assertThat(transfersWithKey(key)).isOne();
     }
@@ -297,7 +412,7 @@ class TransferServiceIT {
         ExecutorService transferThread = Executors.newSingleThreadExecutor();
         try (HeldTransaction other = HeldTransaction.start(owner, sql -> lockAccount(sql, higher))) {
             // The transfer locks the lower id, then waits for the higher one, which the other transaction holds.
-            Future<Transfer> transfer = transferThread.submit(
+            Future<IdempotentResult<Transfer>> transfer = transferThread.submit(
                     () -> transfers.transfer(new TransferCommand(main, savings, usd(100), null, key), caller));
             awaitASessionWaitingForALock(owner);
 
@@ -309,14 +424,16 @@ class TransferServiceIT {
             HeldTransaction.await(otherGetsTheLowerId);
             other.rollback();
 
-            // The retry finds both accounts free.
-            assertThat(transfer.get(WAIT_LIMIT.toSeconds(), SECONDS).amount()).isEqualTo(usd(100));
+            // The retry finds both accounts free. Its first attempt's claim rolled back with it, so it claims again.
+            assertThat(transfer.get(WAIT_LIMIT.toSeconds(), SECONDS).value().amount())
+                    .isEqualTo(usd(100));
         } finally {
             transferThread.shutdownNow();
         }
         assertThat(balance(main)).isEqualTo(usd(900));
         assertThat(balance(savings)).isEqualTo(usd(100));
         assertThat(transfersWithKey(key)).isOne();
+        assertThat(claimsFor(key)).hasSize(1);
         assertThat(auditedIn(caller)).hasSize(1);
     }
 
@@ -328,7 +445,7 @@ class TransferServiceIT {
         List<Object> outcomes =
                 runAtOnce(20, i -> transferCall(new TransferCommand(main, savings, usd(100), null, key()), caller()));
 
-        assertThat(ofType(outcomes, Transfer.class)).hasSize(10);
+        assertThat(results(outcomes)).hasSize(10);
         assertThat(ofType(outcomes, InsufficientFundsException.class)).hasSize(10);
         assertThat(balance(main)).isEqualTo(usd(0));
         assertThat(balance(savings)).isEqualTo(usd(1000));
@@ -339,7 +456,9 @@ class TransferServiceIT {
 
     @Test
     void aTransferIsFoundOnlyByTheClientThatMadeIt() {
-        Transfer transfer = transfers.transfer(new TransferCommand(main, savings, usd(1), null, key()), caller());
+        Transfer transfer = transfers
+                .transfer(new TransferCommand(main, savings, usd(1), null, key()), caller())
+                .value();
         ClientId bob = clientService.createClient("bob");
 
         assertThat(transfers.find(alice, transfer.id())).isEqualTo(transfer);
@@ -349,6 +468,52 @@ class TransferServiceIT {
     }
 
     // --- helpers ---
+
+    /**
+     * Alice's transfer, made inside a transaction this test holds open: its key is claimed and its money posted, but
+     * nothing is committed until the test says so. Another request with the same key then has to wait for it.
+     */
+    private final class HeldTransfer implements AutoCloseable {
+
+        private final CountDownLatch made = new CountDownLatch(1);
+        private final CountDownLatch end = new CountDownLatch(1);
+        private final ExecutorService thread = Executors.newSingleThreadExecutor();
+        private final Future<IdempotentResult<Transfer>> result;
+        private volatile boolean commit = true;
+
+        HeldTransfer(TransferCommand command) throws InterruptedException {
+            Caller caller = caller();
+            result = thread.submit(() -> new TransactionTemplate(transactionManager).execute(status -> {
+                IdempotentResult<Transfer> transfer = transfers.transfer(command, caller);
+                made.countDown();
+                awaitUninterruptibly(end);
+                if (!commit) {
+                    status.setRollbackOnly();
+                }
+                return transfer;
+            }));
+            assertThat(made.await(WAIT_LIMIT.toSeconds(), SECONDS))
+                    .as("the held transfer was made")
+                    .isTrue();
+        }
+
+        IdempotentResult<Transfer> commit() throws Exception {
+            end.countDown();
+            return result.get(WAIT_LIMIT.toSeconds(), SECONDS);
+        }
+
+        void rollBack() throws Exception {
+            commit = false;
+            end.countDown();
+            result.get(WAIT_LIMIT.toSeconds(), SECONDS);
+        }
+
+        @Override
+        public void close() {
+            end.countDown();
+            thread.shutdownNow();
+        }
+    }
 
     private void assertNotFound(AccountId source, AccountId destination, Side side) {
         assertThatThrownBy(() ->
@@ -398,6 +563,13 @@ class TransferServiceIT {
         }
     }
 
+    private static List<IdempotentResult<?>> results(List<Object> outcomes) {
+        return outcomes.stream()
+                .filter(IdempotentResult.class::isInstance)
+                .<IdempotentResult<?>>map(IdempotentResult.class::cast)
+                .toList();
+    }
+
     private static <T> List<T> ofType(List<Object> outcomes, Class<T> type) {
         return outcomes.stream().filter(type::isInstance).map(type::cast).toList();
     }
@@ -432,6 +604,25 @@ class TransferServiceIT {
                 .param("key", key.value())
                 .query(Long.class)
                 .single();
+    }
+
+    /** The operation of Alice's claim on this key, if there is one. */
+    private List<String> claimsFor(IdempotencyKey key) {
+        return jdbc.sql("SELECT operation FROM idempotency_keys WHERE client_id = :clientId AND idempotency_key = :key")
+                .param("clientId", alice.value())
+                .param("key", key.value())
+                .query(String.class)
+                .list();
+    }
+
+    /** Deletes Alice's claim on this key, as the owner. */
+    private void deleteClaim(IdempotencyKey key) {
+        assertThat(owner.jdbc()
+                        .sql("DELETE FROM idempotency_keys WHERE client_id = :clientId AND idempotency_key = :key")
+                        .param("clientId", alice.value())
+                        .param("key", key.value())
+                        .update())
+                .isOne();
     }
 
     /** What was audited in this caller's request, as "ACTION target", read as the owner. */

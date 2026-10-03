@@ -1,5 +1,6 @@
 package io.github.jhanmodi.ledger.web;
 
+import io.github.jhanmodi.ledger.idempotency.IdempotencyKey;
 import io.github.jhanmodi.ledger.ledger.Account;
 import io.github.jhanmodi.ledger.ledger.AccountBalance;
 import io.github.jhanmodi.ledger.ledger.AccountId;
@@ -13,7 +14,6 @@ import io.github.jhanmodi.ledger.money.CurrencyCode;
 import io.github.jhanmodi.ledger.money.Money;
 import io.github.jhanmodi.ledger.transfers.Funding;
 import io.github.jhanmodi.ledger.transfers.FundingCommand;
-import io.github.jhanmodi.ledger.transfers.IdempotencyKey;
 import io.github.jhanmodi.ledger.transfers.Transfer;
 import io.github.jhanmodi.ledger.transfers.TransferCommand;
 import jakarta.validation.Valid;

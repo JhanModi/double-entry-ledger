@@ -1,9 +1,10 @@
 package io.github.jhanmodi.ledger.web;
 
 import io.github.jhanmodi.ledger.clients.AuthenticatedClient;
+import io.github.jhanmodi.ledger.idempotency.IdempotencyKey;
+import io.github.jhanmodi.ledger.idempotency.IdempotentResult;
 import io.github.jhanmodi.ledger.transfers.Funding;
 import io.github.jhanmodi.ledger.transfers.FundingService;
-import io.github.jhanmodi.ledger.transfers.IdempotencyKey;
 import io.github.jhanmodi.ledger.web.ApiJson.FundingRequest;
 import io.github.jhanmodi.ledger.web.ApiJson.FundingResponse;
 import jakarta.servlet.http.HttpServletRequest;
@@ -21,7 +22,8 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * Funding one of the calling client's own accounts, with an {@code admin} key (ADR-0018, D1-A). It stands in for an
  * inbound bank deposit until M9. There's no endpoint to read a funding back yet; its effect shows in the account's
- * balance and history.
+ * balance and history, and a retry with the same {@code Idempotency-Key} and body gets the original response again
+ * (ADR-0023).
  */
 @RestController
 @RequestMapping("/v1/fundings")
@@ -40,8 +42,9 @@ class FundingsController {
             @RequestHeader(IdempotencyKeyHeader.NAME) @Pattern(regexp = IdempotencyKey.FORMAT_REGEX)
                     String idempotencyKey,
             @Valid @RequestBody FundingRequest request) {
-        Funding funding =
+        IdempotentResult<Funding> result =
                 fundings.fund(request.toCommand(new IdempotencyKey(idempotencyKey)), Callers.of(client, http));
-        return ResponseEntity.status(HttpStatus.CREATED).body(FundingResponse.of(funding));
+        return IdempotencyKeyHeader.markIfReplayed(ResponseEntity.status(HttpStatus.CREATED), result)
+                .body(FundingResponse.of(result.value()));
     }
 }

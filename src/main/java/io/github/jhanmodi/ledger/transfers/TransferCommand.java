@@ -1,5 +1,8 @@
 package io.github.jhanmodi.ledger.transfers;
 
+import io.github.jhanmodi.ledger.idempotency.IdempotencyKey;
+import io.github.jhanmodi.ledger.idempotency.IdempotentOperation;
+import io.github.jhanmodi.ledger.idempotency.RequestFingerprint;
 import io.github.jhanmodi.ledger.ledger.AccountId;
 import io.github.jhanmodi.ledger.ledger.PostingRequest;
 import io.github.jhanmodi.ledger.money.Money;
@@ -33,5 +36,20 @@ public record TransferCommand(
             throw new SameAccountException();
         }
         AmountLimits.requireWithinLimit(amount);
+    }
+
+    /**
+     * This request's fingerprint, so a retry can be told apart from a different request with the same key (ADR-0023).
+     * Every field except the key, in a fixed order. The order and names are part of the stored claims' contract: changing
+     * them makes a retry that spans the deploy a 422.
+     */
+    public RequestFingerprint fingerprint() {
+        return RequestFingerprint.of(IdempotentOperation.TRANSFER)
+                .field("sourceAccountId", source.value().toString())
+                .field("destinationAccountId", destination.value().toString())
+                .field("amount", Long.toString(amount.minorUnits()))
+                .field("currency", amount.currency().name())
+                .field("description", description)
+                .build();
     }
 }

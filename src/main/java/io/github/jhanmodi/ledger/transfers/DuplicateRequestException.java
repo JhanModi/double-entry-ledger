@@ -4,9 +4,9 @@ import java.util.Objects;
 import java.util.UUID;
 
 /**
- * The client already used this idempotency key, so this request was not applied again (ADR-0019). Carries the id of
- * the original transfer or funding, so the client can look up what happened. Until M6, this is what a retry gets
- * instead of a replay of the original response.
+ * The client used this idempotency key on a transfer or funding whose claim has since expired and been deleted, so it
+ * can't be replayed (ADR-0023). The request was not applied again. Carries the original's id, so the client can look up
+ * what happened. A retry within the retention period is replayed instead; this is the permanent backstop after it.
  */
 public final class DuplicateRequestException extends RuntimeException {
 

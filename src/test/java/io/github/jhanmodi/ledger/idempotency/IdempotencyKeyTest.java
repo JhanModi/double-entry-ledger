@@ -1,4 +1,4 @@
-package io.github.jhanmodi.ledger.transfers;
+package io.github.jhanmodi.ledger.idempotency;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -7,7 +7,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-/** The same format the database enforces (transfers_idempotency_key_format; MoneyMovementSchemaIT uses these cases). */
+/**
+ * The same format the database enforces (idempotency_keys_key_format, transfers_idempotency_key_format;
+ * IdempotencyKeysSchemaIT and MoneyMovementSchemaIT use these cases).
+ */
 class IdempotencyKeyTest {
 
     @ParameterizedTest

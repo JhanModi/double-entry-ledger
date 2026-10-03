@@ -1,5 +1,6 @@
 package io.github.jhanmodi.ledger.transfers;
 
+import io.github.jhanmodi.ledger.idempotency.IdempotencyKey;
 import io.github.jhanmodi.ledger.ledger.AccountId;
 import io.github.jhanmodi.ledger.ledger.LedgerTransactionId;
 import io.github.jhanmodi.ledger.money.Money;

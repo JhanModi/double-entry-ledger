@@ -19,6 +19,12 @@ ledger:
   # The longest a posting waits for another transaction's lock on an account before giving up with AccountBusyException
   # (ADR-0022). Longer than Postgres's deadlock_timeout (1s), so a real deadlock is still detected as a deadlock.
   lock-timeout: ${LEDGER_LOCK_TIMEOUT:2s}
+  idempotency:
+    # How long an idempotency key's claim is kept for replaying retries (ADR-0023). After that, the cleanup job may
+    # delete it; until it does, the claim is still honoured. Clients are promised at least this long.
+    retention: ${LEDGER_IDEMPOTENCY_RETENTION:24h}
+    # How often the web server deletes expired claims, in batches, starting one interval after startup.
+    cleanup-interval: ${LEDGER_IDEMPOTENCY_CLEANUP_INTERVAL:10m}
 
 logging:
   pattern:

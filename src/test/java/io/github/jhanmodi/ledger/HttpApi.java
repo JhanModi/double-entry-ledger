@@ -60,7 +60,8 @@ public final class HttpApi {
                     response.headers().firstValue("Location"),
                     response.headers().firstValue("WWW-Authenticate"),
                     response.headers().firstValue("X-Request-Id"),
-                    response.headers().firstValue("Retry-After"));
+                    response.headers().firstValue("Retry-After"),
+                    response.headers().firstValue("Idempotent-Replayed"));
         } catch (Exception e) {
             throw new IllegalStateException("HTTP call failed: " + method + " " + path, e);
         }
@@ -73,7 +74,8 @@ public final class HttpApi {
             Optional<String> location,
             Optional<String> wwwAuthenticate,
             Optional<String> requestId,
-            Optional<String> retryAfter) {
+            Optional<String> retryAfter,
+            Optional<String> idempotentReplayed) {
 
         public JsonNode json() {
             return JsonMapper.shared().readTree(body);

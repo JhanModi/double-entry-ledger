@@ -1,5 +1,8 @@
 package io.github.jhanmodi.ledger.transfers;
 
+import io.github.jhanmodi.ledger.idempotency.IdempotencyKey;
+import io.github.jhanmodi.ledger.idempotency.IdempotentOperation;
+import io.github.jhanmodi.ledger.idempotency.RequestFingerprint;
 import io.github.jhanmodi.ledger.ledger.AccountId;
 import io.github.jhanmodi.ledger.money.Money;
 import java.util.Objects;
@@ -30,5 +33,15 @@ public record FundingCommand(AccountId account, Money amount, String externalRef
                     "an external reference is 1 to " + MAX_EXTERNAL_REFERENCE_LENGTH + " characters");
         }
         AmountLimits.requireWithinLimit(amount);
+    }
+
+    /** This request's fingerprint (ADR-0023): every field except the key, in a fixed order. See {@link TransferCommand}. */
+    public RequestFingerprint fingerprint() {
+        return RequestFingerprint.of(IdempotentOperation.FUNDING)
+                .field("accountId", account.value().toString())
+                .field("amount", Long.toString(amount.minorUnits()))
+                .field("currency", amount.currency().name())
+                .field("externalReference", externalReference)
+                .build();
     }
 }

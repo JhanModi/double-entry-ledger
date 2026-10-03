@@ -91,8 +91,9 @@ class ArchitectureTest {
 
     /**
      * Who may depend on whom: each module only on the ones below it, so no module can grow a hidden cycle. The order
-     * is web, then transfers, then ledger, then clients, then audit; money may be used by any of ledger, transfers, and
-     * web. Classes in the base package (the application class and its configuration) belong to no module.
+     * is web, then transfers, then idempotency, then ledger, then clients, then audit; money may be used by any of
+     * ledger, transfers, and web. Classes in the base package (the application class and its configuration) belong to no
+     * module.
      *
      * <p>Empty layers are allowed so the rule can be checked against a handful of classes (see the test below). What
      * ArchUnit can't check is SQL inside strings, so "only the ledger writes entries" is enforced by the ledger's
@@ -105,6 +106,8 @@ class ArchitectureTest {
             .definedBy(BASE + "web..")
             .layer("transfers")
             .definedBy(BASE + "transfers..")
+            .layer("idempotency")
+            .definedBy(BASE + "idempotency..")
             .layer("ledger")
             .definedBy(BASE + "ledger..")
             .layer("clients")
@@ -117,12 +120,14 @@ class ArchitectureTest {
             .mayNotBeAccessedByAnyLayer()
             .whereLayer("transfers")
             .mayOnlyBeAccessedByLayers("web")
-            .whereLayer("ledger")
+            .whereLayer("idempotency")
             .mayOnlyBeAccessedByLayers("transfers", "web")
+            .whereLayer("ledger")
+            .mayOnlyBeAccessedByLayers("idempotency", "transfers", "web")
             .whereLayer("clients")
-            .mayOnlyBeAccessedByLayers("ledger", "transfers", "web")
+            .mayOnlyBeAccessedByLayers("idempotency", "ledger", "transfers", "web")
             .whereLayer("audit")
-            .mayOnlyBeAccessedByLayers("clients", "ledger", "transfers", "web")
+            .mayOnlyBeAccessedByLayers("clients", "idempotency", "ledger", "transfers", "web")
             .whereLayer("money")
             .mayOnlyBeAccessedByLayers("ledger", "transfers", "web")
             .because("modules depend only downward (ADR-0001)");

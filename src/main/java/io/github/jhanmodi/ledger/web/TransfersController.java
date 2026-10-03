@@ -1,7 +1,8 @@
 package io.github.jhanmodi.ledger.web;
 
 import io.github.jhanmodi.ledger.clients.AuthenticatedClient;
-import io.github.jhanmodi.ledger.transfers.IdempotencyKey;
+import io.github.jhanmodi.ledger.idempotency.IdempotencyKey;
+import io.github.jhanmodi.ledger.idempotency.IdempotentResult;
 import io.github.jhanmodi.ledger.transfers.Transfer;
 import io.github.jhanmodi.ledger.transfers.TransferId;
 import io.github.jhanmodi.ledger.transfers.TransferService;
@@ -26,8 +27,8 @@ import org.springframework.web.bind.annotation.RestController;
  * Transfers between two accounts of the calling client (ADR-0018). Both accounts are looked up owner-scoped, so another
  * client's account answers 404 exactly like a missing one.
  *
- * <p>Not safe to retry in the full sense until M6: a retry with the same {@code Idempotency-Key} never moves money
- * twice, but it gets a 409 naming the original transfer, not the original response (ADR-0019).
+ * <p>Safe to retry (ADR-0023): a retry with the same {@code Idempotency-Key} and body gets the original response again,
+ * marked {@code Idempotent-Replayed: true}, and moves nothing. The same key with a different body is a 422.
  */
 @RestController
 @RequestMapping("/v1/transfers")
@@ -46,9 +47,12 @@ class TransfersController {
             @RequestHeader(IdempotencyKeyHeader.NAME) @Pattern(regexp = IdempotencyKey.FORMAT_REGEX)
                     String idempotencyKey,
             @Valid @RequestBody TransferRequest request) {
-        Transfer transfer =
+        IdempotentResult<Transfer> result =
                 transfers.transfer(request.toCommand(new IdempotencyKey(idempotencyKey)), Callers.of(client, http));
-        return ResponseEntity.created(URI.create("/v1/transfers/" + transfer.id()))
+        Transfer transfer = result.value();
+        // A replay is built from the same transfer row, so its status, Location, and body are the original's.
+        return IdempotencyKeyHeader.markIfReplayed(
+                        ResponseEntity.created(URI.create("/v1/transfers/" + transfer.id())), result)
                 .body(TransferResponse.of(transfer));
     }
 

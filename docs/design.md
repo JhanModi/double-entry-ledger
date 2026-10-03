@@ -43,8 +43,8 @@ API client ──HTTPS + API key──▶ ┌───────────�
 | `money` | `Money`, currencies, rounding, allocation | M2 |
 | `ledger` | accounts, ledger transactions, entries, balances, invariant checker; account locking, the lock timeout, and deadlock retries (`RetryingTransactions`) | M3a, M3b, M5 |
 | `clients` | API clients, API keys, scopes, the `Caller` making a request | M4a |
-| `transfers` | transfers and fundings: instant movements, amount limits, interim idempotency keys | M4b |
-| `idempotency` | idempotency keys: claim, request hash, replay | M6 |
+| `transfers` | transfers and fundings: instant movements, amount limits, replaying a transfer or funding by its key | M4b, M6 |
+| `idempotency` | idempotency keys: the claim, request fingerprints, expiry cleanup | M6 |
 | `audit` | append-only audit log; request ids | M4b |
 | `web` | HTTP: security rules, controllers, request ids, Problem Details | M4a, M4b |
 | `payments` | payments, holds, bank instructions, recovery sweeper, `BankRail` | M9a, M9b |
@@ -52,7 +52,7 @@ API client ──HTTPS + API key──▶ ┌───────────�
 | `reconciliation` | statement import, matching, results | M11 |
 | `fx` | rates, quotes, conversions | M12 |
 
-**Dependencies run one way** (ArchUnit, `ArchitectureTest`): web → transfers → ledger → clients → audit, and money is used by ledger, transfers, and web. A module never depends on one above it, so no cycle can form.
+**Dependencies run one way** (ArchUnit, `ArchitectureTest`): web → transfers → idempotency → ledger → clients → audit, and money is used by ledger, transfers, and web. A module never depends on one above it, so no cycle can form.
 
 ## 4. Data model
 
@@ -80,9 +80,17 @@ Since M4b (`V5__create_transfers_fundings_and_audit_log.sql`; [ADR-0018](adr/001
 
 A transfer or funding row and its ledger transaction are written in one database transaction. The ledger stays generic: the business record points to it, never the other way round.
 
+Since M6 (`V6__create_idempotency_keys.sql`; [ADR-0023](adr/0023-idempotency-with-claim-first-and-replay.md)):
+
+| Table | Holds | Key rules (enforced by the database) |
+|---|---|---|
+| `idempotency_keys` | One claim per client and key: the operation that used it, the request's SHA-256 fingerprint, when it was made, and when it expires | `PRIMARY KEY (client_id, idempotency_key)`, so one key space per client across operations; known operations only; the hash is 32 bytes; it expires after it was created; a claim never changes (trigger); the app may SELECT, INSERT, and DELETE, never UPDATE |
+
+A claim is written in the same transaction as the movement it guards, and holds no response: a replay is rebuilt from the transfer or funding row. Expired claims are deleted; the movement rows keep their keys, and their `UNIQUE (client_id, idempotency_key)`, for good.
+
 ## 5. Key flows
 
-### 5.1 Transfer (built in M4b and M5; changes in M6)
+### 5.1 Transfer (built in M4b, M5, and M6)
 
 **Before the transaction**, each step can answer the request on its own:
 1. `RequestIdFilter` gives the request its id (ADR-0021).
@@ -92,25 +100,34 @@ A transfer or funding row and its ledger transaction are written in one database
 
 **In one database transaction** at READ COMMITTED, started by `TransferService` through `RetryingTransactions`:
 1. The service checks the `write` scope again (defense in depth).
-2. **Has this client used this idempotency key?** If so, the answer is 409 with the original's id, and nothing else happens. This comes first, so a retry is recognized even after the money has been spent.
-3. **Look up both accounts owner-scoped:** 404, naming `sourceAccountId` or `destinationAccountId`. Then check that both are in the amount's currency: 422.
-4. **Post the ledger transaction:** debit the source and credit the destination. The posting service ([ADR-0005](adr/0005-pessimistic-row-locking.md), [ADR-0022](adr/0022-lock-timeouts-retries-and-the-busy-response.md)):
+2. **Claim the idempotency key** ([ADR-0023](adr/0023-idempotency-with-claim-first-and-replay.md)). `IdempotencyKeys.claim` sets the 2-second `lock_timeout`, then inserts a claim with the request's fingerprint, unless this client already has one for the key (`ON CONFLICT DO NOTHING`):
+   - **The same request was already carried out** (same operation and fingerprint): read the transfer by its key and **replay** it. Nothing else happens.
+   - **A different request used the key:** 422 `idempotency-key-reused`.
+   - **Another request holds the key and hasn't committed:** wait for it. If it commits, replay it; if it rolls back, the claim is this request's. If it's still running after 2 seconds, 409 `request-in-progress`.
+   - **The key is free:** the claim is this request's, until the transaction ends.
+
+   This comes first, so a retry is recognized even after the money has been spent, and a simultaneous duplicate waits before it touches any account.
+3. **Does a transfer already have this key?** Only if its claim expired and was deleted. Then the answer is 409 `duplicate-request` with the original's id, before any money moves.
+4. **Look up both accounts owner-scoped:** 404, naming `sourceAccountId` or `destinationAccountId`. Then check that both are in the amount's currency: 422.
+5. **Post the ledger transaction:** debit the source and credit the destination. The posting service ([ADR-0005](adr/0005-pessimistic-row-locking.md), [ADR-0022](adr/0022-lock-timeouts-retries-and-the-busy-response.md)):
    1. sets a 2-second `lock_timeout` for the rest of the transaction;
    2. locks both accounts in ascending id order (`FOR NO KEY UPDATE`), waiting its turn if another request holds one;
    3. re-reads their status and balances under the lock, and rejects a closed account or an overdraft (422) before writing anything;
    4. writes the entries and applies each balance change as a SQL delta.
 
    If another request holds an account for over 2 seconds, the answer is 503 `account-busy`, and nothing has moved.
-5. **Insert the transfer row.** Its composite foreign keys re-check ownership and currency, and its unique key guards the idempotency key.
-6. **Write the audit row** (`TRANSFER_CREATED`), then commit.
+6. **Insert the transfer row.** Its composite foreign keys re-check ownership and currency, and its unique key is the permanent backstop for the idempotency key.
+7. **Write the audit row** (`TRANSFER_CREATED`), then commit. The claim commits with everything else.
 
-**If step 5 hits the unique key:** a duplicate request committed while this one was running. This transaction rolls back, the service looks up the winner, and the answer is 409 with its id ([ADR-0019](adr/0019-interim-idempotency-before-m6.md)).
+**If anything fails** (404, 422, 503), everything rolls back, the claim included, so the key is free and a retry runs again. Only successes are remembered.
 
-**If Postgres aborts the transaction to break a deadlock:** `RetryingTransactions` runs it again from step 1, up to 3 attempts in all, after a short random pause. If every attempt is aborted, the answer is 503 `account-busy`. A lock timeout is never retried ([ADR-0022](adr/0022-lock-timeouts-retries-and-the-busy-response.md)).
+**If step 6 hits the unique key:** a duplicate got past the claim, which only a bug in the claim layer could allow. This transaction rolls back, the service looks up the winner, and the answer is 409 `duplicate-request` with its id. `UniqueKeyBackstopIT` proves it with the claim layer switched off.
 
-**M6 replaces step 2:** claim the key first in `idempotency_keys`, hash the request, and replay the stored response ([ADR-0007](adr/0007-idempotency-in-the-business-transaction.md)).
+**If Postgres aborts the transaction to break a deadlock:** `RetryingTransactions` runs it again from step 1, claim included, up to 3 attempts in all, after a short random pause. If every attempt is aborted, the answer is 503 `account-busy`. A lock timeout is never retried ([ADR-0022](adr/0022-lock-timeouts-retries-and-the-busy-response.md)).
 
-**M10 adds:** the outbox event in step 6.
+**The response:** 201 with `Location` and the transfer. A replay is built from the same transfer row, so it's identical, plus `Idempotent-Replayed: true`.
+
+**M10 adds:** the outbox event in step 7.
 
 ### 5.2 Funding (M4b)
 
@@ -118,6 +135,7 @@ Funding has the same shape as a transfer, with these differences ([ADR-0018](adr
 - It needs the `admin` scope, both in the security rules and in the service.
 - It credits one of the caller's own accounts and debits the bank-settlement account for its currency. That account is found by `purpose`, and its id never appears in the API.
 - It records the bank's external reference, and the ledger description is `Deposit <reference>`.
+- Its key is claimed as a `FUNDING`. Keys are per client across operations, so a transfer's key can't be reused for a funding (422).
 
 It stands in for inbound bank payments until M9.
 
@@ -146,7 +164,7 @@ These must hold at all times. The invariant checker verifies the ones that can b
 5. Every customer account's `held_balance` equals the sum of its ACTIVE holds.
 6. Available balance (posted − held) is never negative for accounts that disallow it. See the M8 policy for forced reversals.
 7. An entry's currency equals its account's currency.
-8. One idempotency key produces at most one effect.
+8. One idempotency key produces at most one effect, and every repeat of it gets that effect's result (M6: the claim, then the unique key on the movement row).
 9. Payment status changes only through allowed transitions, and every change is recorded in history.
 10. No ledger transaction is reversed more than once.
 11. Every transfer and funding points to exactly one ledger transaction, and only to accounts of its own client in its own currency (M4b, enforced by the database).
@@ -158,8 +176,15 @@ These must hold at all times. The invariant checker verifies the ones that can b
 
 | Scenario | Outcome | Mechanism | Test (milestone) |
 |---|---|---|---|
-| Client retries after a timeout | Money moves once. Until M6 the retry gets 409 with the original's id; from M6 the stored response is replayed | Unique key (ADR-0019), then ADR-0007 | M4b (`TransferServiceIT`, `FundingServiceIT`, `TransfersApiIT`); M6 |
-| The same request arrives twice at the same moment | One is applied, never both. The other gets 409, or until M6 possibly 422 if the first spent the money | `UNIQUE (client_id, idempotency_key)` | M4b (`TransferServiceIT`: a held-transaction race and an 8-way race) |
+| Client retries after a timeout | Money moves once, and the retry gets the original response, marked `Idempotent-Replayed: true`, even if the money has since been spent. (Before M6: 409 with the original's id.) | The claim, first in the transaction (ADR-0023) | M6 (`TransferServiceIT`, `FundingServiceIT`, `TransfersApiIT`, `FundingsApiIT`) |
+| The same request arrives twice at the same moment | One is applied; the other waits for it at the claim and gets the same response. (Before M6: 409, or 422 if the first spent the money.) | The claim's insert waits for the uncommitted one | M6 (`TransferServiceIT`: held-transaction races and an 8-way race; `IdempotencyKeysIT`; `ConcurrencyIT`) |
+| The same key comes with a different body, or a transfer's key is reused for a funding | 422 `idempotency-key-reused`; nothing moves | The claim's operation and fingerprint are compared (ADR-0023) | M6 (`IdempotencyKeysIT`, `TransferServiceIT`, `FundingServiceIT`, `TransfersApiIT`, `FundingsApiIT`) |
+| A retry arrives while the first attempt is still running, and the first takes more than 2 seconds | 409 `request-in-progress` with `Retry-After: 1`; nothing moves; a later retry gets the first's result. (Before M6: 503 `account-busy`.) | `lock_timeout` set before the claim | M6 (`IdempotencyKeysIT`, `TransferServiceIT`, `TransfersApiIT`) |
+| The first attempt fails (404, 422, 503) | The key stays free: a retry runs again, and may now succeed | The claim rolls back with everything else | M6 (`TransferServiceIT`, `TransfersApiIT`) |
+| A retry arrives after its claim expired and was deleted | 409 `duplicate-request` with the original's id, before any money moves, even if the money has since been spent | The movement row keeps its key; checked right after the claim | M6 (`TransferServiceIT`, `FundingServiceIT`, `IdempotencyCleanupIT`, `TransfersApiIT`) |
+| A bug lets a duplicate past the claim | Still applied once; the loser gets 409 `duplicate-request` | `UNIQUE (client_id, idempotency_key)` on transfers and fundings | M6 (`UniqueKeyBackstopIT`, with the claim layer switched off); M4b (`MoneyMovementSchemaIT`) |
+| Another client sends the same key, even with this client's exact body | Its own request: never a replay of this client's, and this client's accounts are a 404 to it | Claims are keyed by client | M6 (`IdempotencyKeysIT`, `TransferServiceIT`, `TransfersApiIT`) |
+| A compromised app deletes every claim | Clients lose their replays; money still never moves twice | The app can delete claims but not movement rows; the unique keys stay | M6 (`AppRolePrivilegesIT`, `UniqueKeyBackstopIT`) |
 | Two withdrawals race on one account | At most the available funds are spent | Accounts locked, then funds checked under the lock (ADR-0005); SQL deltas; `CHECK` backstop | M5 (`ConcurrencyIT`, `BalanceChangesTest`, `BalanceChangesPropertiesTest`); M4b smoke test (`concurrentTransfersNeverOverdrawTheSource`) |
 | Opposite transfers A→B and B→A at once, or postings naming the same accounts in any order | No deadlock | Customer accounts locked in ascending id order, in one statement (ADR-0005) | M5 (`ConcurrencyIT`, run without retries; `PostingLocksIT` proves the order) |
 | An account is closed while a transfer waits for its lock | The transfer is rejected (422 `account-closed`); nothing moves. (Before M5, the transfer credited the closed account.) | Status re-read under the lock | M5 (`PostingLocksIT`) |
@@ -229,6 +254,14 @@ The general rules are in `CLAUDE.md`.
 - **Audit log** ([ADR-0020](adr/0020-audit-log-in-the-business-transaction.md)): opening an account, a transfer, a funding, creating a client, and issuing a key are each audited in the same transaction as the action. The app can write the log but not read or change it.
 - **Strict input:** an amount must be a JSON integer, and an unknown field is a 400. Bean Validation rejects malformed input (such as a zero amount) before any domain object is built. A domain `IllegalArgumentException` that reaches the API is a bug, and it's a 500.
 
+### Idempotent retries (M6, [ADR-0023](adr/0023-idempotency-with-claim-first-and-replay.md))
+
+- **Every money-moving POST** (`/v1/transfers`, `/v1/fundings`) requires `Idempotency-Key`: 1 to 255 characters from `A-Z a-z 0-9 _ . : -`. Keys belong to the client, across both operations.
+- **The same key and the same request** get the original response: the same status, `Location`, and body, plus `Idempotent-Replayed: true`. "The same request" means the same values after parsing, so spacing and field order don't matter.
+- **A replay is available for at least 24 hours** (`LEDGER_IDEMPOTENCY_RETENTION`). After that, the same key gets 409 `duplicate-request`; it never moves money again.
+- **A failed request doesn't use up its key:** a retry runs again.
+- **409 has two problem types.** A client must tell `duplicate-request` (done) from `request-in-progress` (not finished) by `type`, not by status.
+
 ### Errors
 
 Every error is RFC 9457 Problem Details (`application/problem+json`) with a `requestId`. Stack traces and internal messages never reach a response.
@@ -240,7 +273,9 @@ Every error is RFC 9457 Problem Details (`application/problem+json`) with a `req
 | 403 | `/problems/forbidden` | The key lacks the scope | |
 | 404 | `/problems/account-not-found` | An account the client doesn't own (missing, another client's, or a system account: all alike). Transfers name the field | |
 | 404 | `/problems/transfer-not-found` | A transfer the client doesn't own | |
-| 409 | `/problems/duplicate-request` | The `Idempotency-Key` was already used | `originalId` |
+| 409 | `/problems/duplicate-request` | The `Idempotency-Key` was used by a request that was carried out, and its claim has expired, so it can't be replayed (ADR-0023). Done: don't retry | `originalId` |
+| 409 | `/problems/request-in-progress` | Another request with this `Idempotency-Key` still held it after the 2-second lock timeout. Not done yet: retry with the same key and body to get its result | `Retry-After: 1` header |
+| 422 | `/problems/idempotency-key-reused` | The `Idempotency-Key` was already used for a different request: another body, or another operation | |
 | 422 | `/problems/insufficient-funds` | The source can't cover the amount | |
 | 422 | `/problems/currency-mismatch` | The amount isn't in the account's currency | |
 | 422 | `/problems/same-account` | The source and destination are the same | |
@@ -272,8 +307,15 @@ Strategy: unit, property-based, integration against real Postgres, concurrency, 
   - **Test helpers:** `HeldTransaction` holds an owner transaction open on its own thread and can be handed a next step. `DatabaseLocks` waits for a session blocked on a lock, takes an account's lock, and probes a lock with `NOWAIT`.
   - **Locking** (`PostingLocksIT`): lock order, a status change while a posting waits, the lock timeout, and system accounts never locked.
   - **Real deadlocks, forced** (`TransferServiceIT`, `FundingServiceIT`): the test's transaction and the service wait for each other. The service has waited longer, so Postgres aborts it, and the retry succeeds.
-  - **The suite** (`ConcurrencyIT`): 1,000 mixed requests on four accounts with the invariant checker running throughout; and postings naming the same accounts in every order, straight through the posting service, so a deadlock couldn't be hidden by a retry.
+  - **The suite** (`ConcurrencyIT`): 1,000 mixed requests on four accounts with the invariant checker running throughout; and postings naming the same accounts in every order, straight through the posting service, so a deadlock couldn't be hidden by a retry. Since M6, its repeated requests must replay exactly the movement their original made, and claims, movement rows, and audit rows must match one to one.
   - **Each layer on its own:** the Java funds check (`BalanceChangesTest`), the `CHECK` backstop (`LedgerSchemaIT`), lock order without retries (`ConcurrencyIT`), and retries without a database (`RetryingTransactionsTest`).
+- **Idempotency tests** (M6; primer 06):
+  - **The claim on its own** (`IdempotencyKeysIT`): new, repeat, reused, per client, rolled back with its transaction, only inside a transaction, and the three ways a held claim can end (commit, rollback, past the lock timeout). The table's guards: `IdempotencyKeysSchemaIT`.
+  - **The fingerprint** (`RequestFingerprintTest`, `MoneyMovementFingerprintsTest`): the encoding and two commands' hashes are pinned to values computed with `sha256sum`. A property test (`MoneyMovementFingerprintsPropertiesTest`) checks that two commands share a fingerprint exactly when they're the same request.
+  - **The services** (`TransferServiceIT`, `FundingServiceIT`): replays, reuse, races, a deleted claim, another client's key.
+  - **The unique-key backstop on its own** (`UniqueKeyBackstopIT`): the claim layer is replaced by a mock that lets every request through, and the movement rows' unique keys still apply each key once.
+  - **Over HTTP** (`TransfersApiIT`, `FundingsApiIT`): the replayed response and its header, a re-serialized body, each problem type, and another client sending the same key.
+  - **Cleanup** (`IdempotencyCleanupIT`): only expired claims go, in batches, on the configured schedule; and a retry after its claim is deleted still can't move money twice. `ClientsCommandIT` checks the command-line mode never schedules it.
 - **Planted-bug checks:** at the end of each checkpoint, bugs are planted in a scratchpad copy of the code to confirm the tests catch them. The roadmap records each run.
 - **CI** (`.github/workflows/ci.yml`): `./mvnw verify` on Temurin 25, plus a gitleaks scan of the full git history.
 

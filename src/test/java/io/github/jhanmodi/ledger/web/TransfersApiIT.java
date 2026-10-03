@@ -30,6 +30,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.ObjectNode;
 
@@ -63,6 +64,7 @@ class TransfersApiIT {
     LedgerFixtures ledger;
     String aliceKey;
     String bobKey;
+    ClientId alice;
     ClientId bob;
     AccountId main;
     AccountId savings;
@@ -71,7 +73,7 @@ class TransfersApiIT {
     void setUp() {
         api = new HttpApi(port);
         ledger = new LedgerFixtures(accountService, postingService, clients);
-        ClientId alice = clients.createClient("Alice's business");
+        alice = clients.createClient("Alice's business");
         aliceKey = bearer(
                 clients.issueKey(alice, EnumSet.of(Scope.READ, Scope.WRITE)).plaintext());
         bob = clients.createClient("Bob's business");
@@ -122,18 +124,97 @@ class TransfersApiIT {
         assertInvalidFields(transfer(newKey(), bodyWith(main, savings, "1", "USD", tooLong)), "description");
     }
 
-    // --- Retries (ADR-0019) ---
+    // --- Retries (ADR-0023) ---
 
     @Test
-    void aRetryWithTheSameKeyIsA409NamingTheOriginal() {
+    void aRetryWithTheSameKeyAndBodyGetsTheOriginalResponseAgainAndMovesNothing() {
         String key = newKey();
-        String originalId =
-                transfer(key, body(main, savings, "300")).json().get("id").asString();
+        HttpApi.Response original = transfer(key, body(main, savings, "300"));
 
         HttpApi.Response retry = transfer(key, body(main, savings, "300"));
 
-        assertProblem(retry, 409, "/problems/duplicate-request");
-        assertThat(retry.json().get("originalId").asString()).isEqualTo(originalId);
+        assertThat(original.idempotentReplayed()).as("only a replay is marked").isEmpty();
+        assertThat(retry.status()).as(retry.body()).isEqualTo(201);
+        assertThat(retry.idempotentReplayed()).contains("true");
+        assertThat(retry.location()).isPresent().isEqualTo(original.location());
+        assertThat(retry.json()).isEqualTo(original.json());
+        assertThat(retry.requestId()).as("each request still has its own id").isNotEqualTo(original.requestId());
+        assertThat(balance(main)).isEqualTo(usd(700));
+        assertThat(balance(savings)).isEqualTo(usd(300));
+    }
+
+    @Test
+    void theSameRequestWrittenDifferentlyIsStillTheSameRequest() {
+        // The fingerprint is taken from the parsed request, not its bytes (ADR-0023, D3), so other spacing and
+        // another field order are still the same request.
+        String key = newKey();
+        HttpApi.Response original = transfer(key, bodyWith(main, savings, "300", "USD", "\"rent\""));
+        String rewritten = """
+                {
+                    "description" : "rent",
+                    "amount" : { "currency" : "USD", "amount" : 300 },
+                    "destinationAccountId" : "%s",
+                    "sourceAccountId" : "%s"
+                }""".formatted(savings, main);
+
+        HttpApi.Response retry = transfer(key, rewritten);
+
+        assertThat(retry.status()).as(retry.body()).isEqualTo(201);
+        assertThat(retry.idempotentReplayed()).contains("true");
+        assertThat(retry.json()).isEqualTo(original.json());
+        assertThat(balance(main)).isEqualTo(usd(700));
+    }
+
+    @Test
+    void theSameKeyWithADifferentRequestIsA422AndMovesNothing() {
+        String key = newKey();
+        transfer(key, bodyWith(main, savings, "300", "USD", "\"rent\""));
+
+        HttpApi.Response otherAmount = transfer(key, bodyWith(main, savings, "301", "USD", "\"rent\""));
+        HttpApi.Response otherDescription = transfer(key, bodyWith(main, savings, "300", "USD", "\"food\""));
+
+        assertProblem(otherAmount, 422, "/problems/idempotency-key-reused");
+        assertProblem(otherDescription, 422, "/problems/idempotency-key-reused");
+        assertThat(otherAmount.idempotentReplayed()).isEmpty();
+        assertThat(balance(main)).isEqualTo(usd(700));
+    }
+
+    @Test
+    void aRequestWhoseKeyIsStillHeldAfterTheLockTimeoutIsA409InProgressAndSafeToRetry() {
+        String key = newKey();
+
+        HttpApi.Response inProgress;
+        // Another request has claimed Alice's key and hasn't finished: its claim is held, uncommitted, for longer than
+        // the 2-second lock timeout.
+        try (HeldTransaction other = HeldTransaction.start(owner, sql -> claimKey(sql, alice, key))) {
+            inProgress = transfer(key, body(main, savings, "300"));
+        }
+
+        assertProblem(inProgress, 409, "/problems/request-in-progress");
+        assertThat(inProgress.retryAfter()).contains("1");
+        assertThat(inProgress.json().get("requestId").asString())
+                .isEqualTo(inProgress.requestId().orElseThrow());
+        assertThat(balance(main)).isEqualTo(usd(1000));
+
+        // The other request rolled back without doing anything, so the retry carries this one out.
+        HttpApi.Response retry = transfer(key, body(main, savings, "300"));
+        assertThat(retry.status()).as(retry.body()).isEqualTo(201);
+        assertThat(retry.idempotentReplayed()).isEmpty();
+        assertThat(balance(main)).isEqualTo(usd(700));
+    }
+
+    @Test
+    void aRetryAfterTheClaimHasExpiredIsA409NamingTheOriginal() {
+        String key = newKey();
+        String originalId =
+                transfer(key, body(main, savings, "300")).json().get("id").asString();
+        deleteClaim(alice, key); // what the cleanup does after the retention period
+
+        HttpApi.Response late = transfer(key, body(main, savings, "300"));
+
+        assertProblem(late, 409, "/problems/duplicate-request");
+        assertThat(late.json().get("originalId").asString()).isEqualTo(originalId);
+        assertThat(late.retryAfter()).as("done, so not something to retry").isEmpty();
         assertThat(balance(main)).isEqualTo(usd(700));
     }
 
@@ -237,6 +318,35 @@ class TransfersApiIT {
         assertThat(withoutPerRequestFields(bobReads)).isEqualTo(withoutPerRequestFields(bobReadsNothing));
     }
 
+    @Test
+    void anotherClientUsingTheSameKeyNeverGetsThisClientsResponse() {
+        String key = newKey();
+        String alicesId =
+                transfer(key, body(main, savings, "300")).json().get("id").asString();
+
+        // Bob sends Alice's exact request with her key. Keys belong to a client, so this is Bob's own new request, and
+        // Alice's accounts aren't his: a 404 that reveals nothing, never a replay of her transfer.
+        HttpApi.Response copied =
+                api.send("POST", "/v1/transfers", bobKey, body(main, savings, "300"), idempotency(key));
+
+        assertProblem(copied, 404, "/problems/account-not-found");
+        assertThat(copied.body()).doesNotContain(alicesId);
+        assertThat(copied.idempotentReplayed()).isEmpty();
+
+        // With his own accounts, the same key simply starts Bob's own transfer.
+        AccountId bobsMain = ledger.customer(bob, USD);
+        AccountId bobsSavings = ledger.customer(bob, USD);
+        ledger.fund(ledger.bank(USD), bobsMain, usd(500));
+        HttpApi.Response bobs =
+                api.send("POST", "/v1/transfers", bobKey, body(bobsMain, bobsSavings, "300"), idempotency(key));
+
+        assertThat(bobs.status()).as(bobs.body()).isEqualTo(201);
+        assertThat(bobs.idempotentReplayed()).isEmpty();
+        assertThat(bobs.json().get("id").asString()).isNotEqualTo(alicesId);
+        assertThat(balance(main)).isEqualTo(usd(700));
+        assertThat(balance(bobsSavings)).isEqualTo(usd(300));
+    }
+
     // --- 422: well-formed, but the business rules say no ---
 
     @Test
@@ -273,7 +383,8 @@ class TransfersApiIT {
                 .isEqualTo(busy.requestId().orElseThrow());
         assertThat(balance(main)).isEqualTo(usd(1000));
 
-        // Nothing moved and the key wasn't used, so the same request with the same key now goes through, once.
+        // Nothing moved, and the key's claim rolled back with the rest, so the same request with the same key now goes
+        // through, once.
         HttpApi.Response retry = transfer(key, body(main, savings, "300"));
         assertThat(retry.status()).as(retry.body()).isEqualTo(201);
         assertThat(balance(main)).isEqualTo(usd(700));
@@ -287,6 +398,9 @@ class TransfersApiIT {
                 bearer(clients.issueKey(clientOf(main), EnumSet.of(Scope.READ)).plaintext());
         String key = newKey();
         transfer(key, body(main, savings, "1"));
+        String expiredKey = newKey();
+        transfer(expiredKey, body(main, savings, "1"));
+        deleteClaim(alice, expiredKey);
 
         List<HttpApi.Response> errors = new ArrayList<>(
                 List.of(
@@ -300,7 +414,8 @@ class TransfersApiIT {
                                 body(main, savings, "1"),
                                 idempotency(newKey())), // 403
                         transfer(newKey(), body(main, new AccountId(UUID.randomUUID()), "1")), // 404
-                        transfer(key, body(main, savings, "1")), // 409
+                        transfer(expiredKey, body(main, savings, "1")), // 409: duplicate-request
+                        transfer(key, body(main, savings, "2")), // 422: the key was used for a different request
                         transfer(newKey(), body(main, savings, "100000"))) // 422
                 );
 
@@ -320,6 +435,24 @@ class TransfersApiIT {
 
     private static Map<String, String> idempotency(String key) {
         return Map.of("Idempotency-Key", key);
+    }
+
+    /** Another request's claim on this client's key, made as the owner, for as long as the caller's transaction lasts. */
+    private static void claimKey(JdbcClient sql, ClientId client, String key) {
+        sql.sql("""
+                        INSERT INTO idempotency_keys (client_id, idempotency_key, operation, request_hash, expires_at)
+                        VALUES (:clientId, :key, 'TRANSFER', decode(repeat('ab', 32), 'hex'), now() + interval '1 day')
+                        """).param("clientId", client.value()).param("key", key).update();
+    }
+
+    /** Deletes this client's claim on the key, as the owner: what the cleanup does once a claim has expired. */
+    private void deleteClaim(ClientId client, String key) {
+        assertThat(owner.jdbc()
+                        .sql("DELETE FROM idempotency_keys WHERE client_id = :clientId AND idempotency_key = :key")
+                        .param("clientId", client.value())
+                        .param("key", key)
+                        .update())
+                .isOne();
     }
 
     /** A transfer body in USD with no description. {@code amount} is raw JSON, so tests can send any token. */

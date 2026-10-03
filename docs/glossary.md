@@ -53,8 +53,17 @@ The terms used in code, docs, and the API. Use them consistently, and add to thi
 
 ## Reliability
 
-- **Idempotency key.** A client-chosen unique value sent with a write request, in the `Idempotency-Key` header. Repeating the request with the same key has the same effect as sending it once. Keys are unique per client. Until M6 a repeat gets 409 naming the original; from M6 it gets the original response.
-- **Duplicate request.** A request whose idempotency key the client already used. Answered with 409 and the original's id, and never applied again.
+- **Idempotent.** Doing it twice has the same effect as doing it once. A money-moving `POST` is made idempotent by its idempotency key.
+- **Idempotency key.** A client-chosen value sent with a money-moving request, in the `Idempotency-Key` header. The client sends the same key with every retry of one intended request. Keys belong to a client, across every operation. Repeating the request with the same key has the same effect as sending it once, and gets the same response (ADR-0023).
+- **Claim.** The row in `idempotency_keys` that says "this client's key belongs to this request". Inserted as the first statement of the request's own transaction, so it commits with the money movement or rolls back with it. Records the operation and the request fingerprint, never the response.
+- **Request fingerprint.** The SHA-256 hash of a request's operation and validated fields, in a fixed, length-prefixed encoding. Two requests have the same fingerprint exactly when they're the same request. A retry is compared with the original by fingerprint.
+- **Hash.** A function that turns any input into a fixed-size value. The same input always gives the same value, and two different inputs practically never collide. SHA-256 gives 32 bytes.
+- **Replay.** Answering a repeated request with the original's result, rebuilt from the transfer or funding row, without doing anything again. Marked with the `Idempotent-Replayed: true` header.
+- **Idempotency key reused.** The same key sent with a different request: a different body, or a different operation. Refused with 422, because it's almost always a client bug.
+- **Request in progress.** The 409 answer when another request with the same key still holds it after the lock timeout. Nothing is known about that request's outcome yet, so it isn't "done". Retrying later with the same key and body gets its result. Comes with `Retry-After: 1`.
+- **Duplicate request.** The 409 answer for a key whose claim has expired and been deleted, while the transfer or funding it created still has the key. Carries the original's id, and is never applied again.
+- **Retention period.** How long a claim is kept, and so how long a retry gets a replay: at least 24 hours. After that, a scheduled job deletes expired claims.
+- **Savepoint.** A bookmark inside a transaction: rolling back to it undoes only what came after it. M6 deliberately doesn't use one (ADR-0023).
 - **Exactly-once effect.** A request may be *delivered* more than once, but its effect happens only once.
 - **At-least-once delivery.** A message may arrive more than once but is never lost. Consumers must deduplicate.
 - **Transactional outbox.** Events are written to a table in the same database transaction as the change they describe, then published by a relay.
@@ -75,7 +84,8 @@ The terms used in code, docs, and the API. Use them consistently, and add to thi
 - **Constraint.** A rule the database enforces on every write, e.g. `CHECK (amount > 0)`, whichever program does the writing.
 - **Constraint trigger (deferred).** A trigger whose check waits until `COMMIT`. Used for "a transaction's debits equal its credits," which is only true once every entry is in.
 - **Composite foreign key.** A foreign key over several columns, e.g. `(account_id, client_id, currency) → accounts (id, client_id, currency)`: the row must point to an account with *this* id, *this* owner, and *this* currency. Used so the database itself refuses a transfer that touches another client's account.
-- **Unique constraint as a guard.** `UNIQUE (client_id, idempotency_key)` means two transactions can't both commit the same key. The second one waits for the first; if the first commits, the second fails and rolls back.
+- **Unique constraint as a guard.** `UNIQUE (client_id, idempotency_key)` means two transactions can't both commit the same key. The second one waits for the first; if the first commits, the second fails and rolls back. On `transfers` and `fundings` it's the **permanent backstop** behind the claim: it still holds after the claim has expired.
+- **`INSERT … ON CONFLICT DO NOTHING`.** Inserts the row, unless one with the same unique key exists; then inserts nothing. If the existing row isn't committed yet, it waits to see whether it will be. Used to claim an idempotency key.
 - **Append-only.** Rows can be inserted but never updated or deleted. Corrections are new rows. Enforced in two layers: triggers reject an update or delete by any role, which catches mistakes, and privileges stop the app. The triggers aren't a defense against the owner or a superuser, who can switch them off on purpose (ADR-0015).
 - **Keyset pagination.** Paging by "rows after the last one I saw" (a cursor) instead of `OFFSET`. Costs the same on every page, and new rows don't shift earlier pages.
 - **UUIDv7.** A UUID that starts with a timestamp, so new ids sort in creation order (ADR-0014).
@@ -98,7 +108,7 @@ The terms used in code, docs, and the API. Use them consistently, and add to thi
 - **Deny by default.** Every endpoint needs an explicit security rule; anything without one is refused.
 - **IDOR (insecure direct object reference).** Reaching someone else's data by changing an id in a request. Prevented here by putting the owner in the SQL (ADR-0017).
 - **Problem Details (RFC 9457).** The standard JSON error format (`type`, `title`, `status`, `detail`, `instance`), served as `application/problem+json`. Each kind of error has its own **problem type**, such as `/problems/insufficient-funds`, so clients can branch on it (catalogue in design §8).
-- **400 vs 404 vs 409 vs 422 vs 503.** 400: the input is malformed (`invalid-request`, naming the fields). 404: the client has no such thing. 409: it repeats something already done. 422: well-formed, but the business rules refuse it. 503: try again later, because other requests are using the same account (`account-busy`).
+- **400 vs 404 vs 409 vs 422 vs 503.** 400: the input is malformed (`invalid-request`, naming the fields). 404: the client has no such thing. 409: the idempotency key is held, or was once held, by another request (`duplicate-request`: done; `request-in-progress`: not finished). 422: well-formed, but the business rules refuse it, including a key reused for a different request. 503: try again later, because other requests are using the same account (`account-busy`).
 - **Caller.** An API client making one request: its verified key plus the request's id and source address. Services that change something take a `Caller`, so they can check its scope and audit it.
 - **Request id.** A UUID the server gives every request. It's in the `X-Request-Id` header, in every error, on every log line, and on audit rows, so one id ties a client's report to everything the request did. Never taken from the client.
 - **MDC (Mapped Diagnostic Context).** A per-thread map the logger adds to every line. The request id is put there for the length of the request and removed afterwards, because the server reuses threads.

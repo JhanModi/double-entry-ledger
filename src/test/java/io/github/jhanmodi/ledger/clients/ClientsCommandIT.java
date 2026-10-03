@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.jhanmodi.ledger.OwnerDatabase;
 import io.github.jhanmodi.ledger.TestcontainersConfiguration;
+import io.github.jhanmodi.ledger.idempotency.IdempotencyCleanup;
 import java.util.Arrays;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -14,6 +15,7 @@ import org.springframework.boot.DefaultApplicationArguments;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Import;
 
 /**
@@ -33,6 +35,15 @@ class ClientsCommandIT {
 
     @Autowired
     OwnerDatabase owner;
+
+    @Autowired
+    ApplicationContext context;
+
+    @Test
+    void theCommandLineModeNeverCleansUpIdempotencyKeys() {
+        // A one-off command starts and exits; only the web server runs scheduled jobs (ADR-0023).
+        assertThat(context.getBeanNamesForType(IdempotencyCleanup.class)).isEmpty();
+    }
 
     @Test
     void createsAClientAndPrintsAWorkingKeyExactlyOnce(CapturedOutput output) {

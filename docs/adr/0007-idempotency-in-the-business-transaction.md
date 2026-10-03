@@ -1,6 +1,6 @@
 # ADR-0007: Idempotency recorded inside the business transaction
 
-- **Status:** Accepted
+- **Status:** Accepted; what is stored, how replays are built, and how the operation is named superseded by ADR-0023
 - **Date:** 2026-10-01
 
 ## Context

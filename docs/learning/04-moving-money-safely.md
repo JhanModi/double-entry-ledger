@@ -60,7 +60,7 @@ The unique constraint is what guarantees "never twice".
 
 **Why the key is checked first anyway:** a retry that arrives after the first request has *finished* should get "duplicate", even if the money has since been spent. Checking the key before anything else makes that the answer.
 
-**The gap until M6:** if two identical requests overlap and the first spends all the money, the second may fail its balance check before it ever reaches the unique key, and get 422 instead of 409. The money still moves once. M6 fixes this by claiming the key as the very first write.
+**The gap until M6:** if two identical requests overlap and the first spends all the money, the second may fail its balance check before it ever reaches the unique key, and get 422 instead of 409. The money still moves once. M6 fixed this by claiming the key as the very first write, and a retry now gets the original response instead of a 409 (primer 06).
 
 ---
 
@@ -94,7 +94,7 @@ Parsing JSON into Java involves **coercion**: turning one kind of value into ano
 | 401 | No valid key |
 | 403 | The key can't do this |
 | 404 | The client has no such thing (and can't tell whether it exists for someone else) |
-| 409 | This repeats something already done |
+| 409 | The idempotency key is taken: by a request that's done (`duplicate-request`) or still running (`request-in-progress`, since M6; primer 06) |
 | 422 | Well-formed, but the business rules say no (insufficient funds, wrong currency, …) |
 | 500 | A bug on our side, logged and never explained to the client |
 | 503 | Try again later: other requests are using the same account (added in M5; primer 05) |

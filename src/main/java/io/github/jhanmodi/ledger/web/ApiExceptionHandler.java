@@ -1,6 +1,8 @@
 package io.github.jhanmodi.ledger.web;
 
 import io.github.jhanmodi.ledger.clients.ScopeRequiredException;
+import io.github.jhanmodi.ledger.idempotency.IdempotencyKeyReusedException;
+import io.github.jhanmodi.ledger.idempotency.RequestInProgressException;
 import io.github.jhanmodi.ledger.ledger.AccountBusyException;
 import io.github.jhanmodi.ledger.ledger.AccountClosedException;
 import io.github.jhanmodi.ledger.ledger.AccountNotFoundException;
@@ -60,9 +62,10 @@ import tools.jackson.databind.exc.UnrecognizedPropertyException;
  * <p>Every problem carries a {@code requestId}, the same id as the {@code X-Request-Id} header (ADR-0021), so a client
  * can quote it and support can find the request's log lines.
  *
- * <p>Status codes: 400 for input that is malformed, 404 for something the client doesn't have, 409 for a request that
- * repeats one already done, 422 for a well-formed request that the business rules refuse, and 503 for one that should
- * be retried later because other requests are using the same account.
+ * <p>Status codes: 400 for input that is malformed, 404 for something the client doesn't have, 409 for a request whose
+ * idempotency key another request holds or once held, 422 for a well-formed request that the business rules refuse
+ * (including a key reused for a different request), and 503 for one that should be retried later because other
+ * requests are using the same account.
  */
 @RestControllerAdvice
 class ApiExceptionHandler extends ResponseEntityExceptionHandler {
@@ -75,6 +78,9 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     /** How long a client should wait before retrying a request that got 503 account-busy (ADR-0022). */
     private static final Duration RETRY_AFTER_WHEN_BUSY = Duration.ofSeconds(1);
+
+    /** How long a client should wait before retrying a request that got 409 request-in-progress (ADR-0023). */
+    private static final Duration RETRY_AFTER_WHEN_IN_PROGRESS = Duration.ofSeconds(1);
 
     // --- 404: not one of the client's own ---
 
@@ -123,8 +129,12 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
                 request, HttpStatus.FORBIDDEN, "forbidden", "Forbidden", "This API key is not allowed to do that.");
     }
 
-    // --- 409: a retry of something already done (ADR-0019) ---
+    // --- 409: the idempotency key is held, or was once held, by another request (ADR-0023) ---
+    //
+    // Two problem types, which a client must tell apart by type rather than by status: duplicate-request means the
+    // first request was done, and request-in-progress means it isn't finished yet.
 
+    /** The key's claim expired and was deleted, so the original can't be replayed; its record still has the key. */
     @ExceptionHandler(DuplicateRequestException.class)
     ProblemDetail duplicateRequest(DuplicateRequestException e, HttpServletRequest request) {
         ProblemDetail problem = problem(
@@ -132,13 +142,47 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
                 HttpStatus.CONFLICT,
                 "duplicate-request",
                 "Duplicate request",
-                "This Idempotency-Key was already used, so nothing was done this time. "
-                        + "originalId identifies what the first request created.");
+                "This Idempotency-Key was used by an earlier request that was carried out, and its result is too old to "
+                        + "replay. Nothing was done this time. originalId identifies what the first request created.");
         problem.setProperty("originalId", e.originalId());
         return problem;
     }
 
+    /**
+     * Another request with the same key still held it after the lock timeout. Its outcome isn't known yet, so this is
+     * not "done": the client retries later with the same key and body, and gets that request's result.
+     */
+    @ExceptionHandler(RequestInProgressException.class)
+    ResponseEntity<ProblemDetail> requestInProgress(RequestInProgressException e, HttpServletRequest request) {
+        // No stack trace: expected when a retry overlaps a slow first attempt. Many of these at once would suggest
+        // a transaction stuck while holding its key.
+        log.warn("Gave up waiting for another request with the same Idempotency-Key: {}", e.getMessage());
+        ProblemDetail problem = problem(
+                request,
+                HttpStatus.CONFLICT,
+                "request-in-progress",
+                "Request in progress",
+                "Another request with this Idempotency-Key is still being processed, and its outcome isn't known yet. "
+                        + "Nothing was done by this request. Retry after the Retry-After delay, with the same "
+                        + "Idempotency-Key and body, to get that request's result.");
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(RETRY_AFTER_WHEN_IN_PROGRESS.toSeconds()))
+                .body(problem);
+    }
+
     // --- 422: well-formed, but the business rules say no. Nothing was moved. ---
+
+    /** The key was used for a different request: usually a client reusing a key for a new request (ADR-0023). */
+    @ExceptionHandler(IdempotencyKeyReusedException.class)
+    ProblemDetail idempotencyKeyReused(IdempotencyKeyReusedException e, HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.UNPROCESSABLE_CONTENT,
+                "idempotency-key-reused",
+                "Idempotency key reused",
+                "This Idempotency-Key was already used for a different request. Nothing was done. A new request "
+                        + "needs a new key; a retry must send exactly the same request as the first.");
+    }
 
     @ExceptionHandler(InsufficientFundsException.class)
     ProblemDetail insufficientFunds(InsufficientFundsException e, HttpServletRequest request) {

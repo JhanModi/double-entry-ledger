@@ -8,8 +8,9 @@ A double-entry ledger and payments API in Java and Spring Boot.
 > - an authenticated API for opening accounts, reading balances and history, funding accounts, and moving money between a client's own accounts
 > - an append-only audit log, and a request id on every response
 > - safety under concurrency: accounts locked in one fixed order, a 2-second limit on waiting for a lock, deadlock retries, and a test that sends 1,000 requests at once while checking the ledger's invariants
+> - safe retries: an idempotency key claimed in the same transaction as the money movement, so a retried request gets the original response and never moves money twice
 >
-> Next: full idempotency with response replay (M6). See the [roadmap](docs/roadmap.md).
+> Next: the resume checkpoint (M7). See the [roadmap](docs/roadmap.md).
 
 ## Prerequisites
 
@@ -70,7 +71,7 @@ Maven doesn't need to be installed: the Maven Wrapper (`mvnw`) downloads the pin
 
 **Conventions:**
 - **Amounts** are integer minor units plus a currency: `{"amount": 1050, "currency": "USD"}` is $10.50. Anything else, such as `10.5` or `"1050"`, is rejected, and so are fields the API doesn't define.
-- **Every money-moving POST needs an `Idempotency-Key` header.** Sending the same key again never moves money twice; it gets a 409 naming the original. Until M6, a retry doesn't get the original response back.
+- **Every money-moving POST needs an `Idempotency-Key` header.** Retrying with the same key and body returns the original response (with `Idempotent-Replayed: true`) for at least 24 hours, and never moves money twice. The same key with a different body is a 422. A 409 `request-in-progress` means the first attempt hasn't finished: retry after `Retry-After` with the same key and body.
 - **Errors** use RFC 9457 Problem Details, with one `type` per kind of error ([catalogue](docs/design.md#errors)) and a `requestId` that matches the `X-Request-Id` header.
 - **A 503 `account-busy` means "try again later":** other requests held the account for too long. Nothing moved, so retry after the `Retry-After` delay with the same `Idempotency-Key`.
 - **Another client's account** returns 404, exactly like one that doesn't exist.

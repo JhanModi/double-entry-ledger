@@ -4,6 +4,7 @@ import static io.github.jhanmodi.ledger.money.CurrencyCode.USD;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.github.jhanmodi.ledger.idempotency.IdempotencyKey;
 import io.github.jhanmodi.ledger.ledger.AccountId;
 import io.github.jhanmodi.ledger.money.Money;
 import java.util.UUID;

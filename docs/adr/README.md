@@ -10,7 +10,7 @@ An ADR records one significant decision: the context, the options considered, wh
 | [0004](0004-balances-as-cached-projection.md) | Balances are a cached projection of entries | Accepted |
 | [0005](0005-pessimistic-row-locking.md) | Pessimistic row locking in a fixed order | Accepted |
 | [0006](0006-holds-table.md) | Authorization holds in a holds table, with expiry | Accepted |
-| [0007](0007-idempotency-in-the-business-transaction.md) | Idempotency recorded inside the business transaction | Accepted |
+| [0007](0007-idempotency-in-the-business-transaction.md) | Idempotency recorded inside the business transaction | Accepted; what is stored and how replays are built superseded by ADR-0023 |
 | [0008](0008-jdbcclient-with-hand-written-sql.md) | `JdbcClient` with hand-written SQL (no JPA, decided in M4) | Accepted |
 | [0009](0009-transactional-outbox.md) | Transactional outbox, Kafka later | Accepted |
 | [0010](0010-in-process-mock-bank-and-recovery.md) | In-process mock bank and payment recovery | Accepted |
@@ -22,10 +22,11 @@ An ADR records one significant decision: the context, the options considered, wh
 | [0016](0016-api-key-format-transport-and-bootstrap.md) | API key format, transport, and bootstrap | Accepted |
 | [0017](0017-tenant-isolation-and-error-format.md) | Tenant isolation and the error format | Accepted; unknown-field handling superseded by ADR-0021 |
 | [0018](0018-transfers-and-funding-over-the-ledger.md) | Transfers and funding as business records over the ledger | Accepted |
-| [0019](0019-interim-idempotency-before-m6.md) | Interim idempotency until M6 | Accepted |
+| [0019](0019-interim-idempotency-before-m6.md) | Interim idempotency until M6 | Superseded by ADR-0023 |
 | [0020](0020-audit-log-in-the-business-transaction.md) | An append-only audit log, written in the business transaction | Accepted |
 | [0021](0021-request-ids-and-strict-request-parsing.md) | Request ids and strict request parsing | Accepted |
 | [0022](0022-lock-timeouts-retries-and-the-busy-response.md) | Lock timeouts, deadlock retries, and the busy response | Accepted |
+| [0023](0023-idempotency-with-claim-first-and-replay.md) | Idempotency with a claim first and a replay | Accepted |
 
 ## Template
 

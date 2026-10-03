@@ -118,18 +118,48 @@ class FundingsApiIT {
     }
 
     @Test
-    void aRetryWithTheSameKeyFundsOnce() {
+    void aRetryWithTheSameKeyAndBodyGetsTheOriginalFundingAndFundsOnce() {
         String key = newKey();
-        String originalId = fund(adminKey, key, body(account, "100", "\"BANK-REF-4\""))
-                .json()
-                .get("id")
-                .asString();
+        HttpApi.Response original = fund(adminKey, key, body(account, "100", "\"BANK-REF-4\""));
 
         HttpApi.Response retry = fund(adminKey, key, body(account, "100", "\"BANK-REF-4\""));
 
-        assertThat(retry.status()).isEqualTo(409);
-        assertThat(retry.json().get("originalId").asString()).isEqualTo(originalId);
+        assertThat(original.idempotentReplayed()).isEmpty();
+        assertThat(retry.status()).as(retry.body()).isEqualTo(201);
+        assertThat(retry.idempotentReplayed()).contains("true");
+        assertThat(retry.json()).isEqualTo(original.json());
         assertThat(balance(account)).isEqualTo(usd(100));
+    }
+
+    @Test
+    void theSameKeyWithADifferentFundingIsA422() {
+        String key = newKey();
+        fund(adminKey, key, body(account, "100", "\"BANK-REF-5\""));
+
+        HttpApi.Response different = fund(adminKey, key, body(account, "100", "\"BANK-REF-6\""));
+
+        assertThat(different.status()).as(different.body()).isEqualTo(422);
+        assertThat(different.json().get("type").asString()).isEqualTo("/problems/idempotency-key-reused");
+        assertThat(balance(account)).isEqualTo(usd(100));
+    }
+
+    @Test
+    void aTransfersKeyCantBeUsedForAFunding() {
+        // One key space per client, across operations (ADR-0023). This admin key may transfer too.
+        AccountId savings = ledger.customer(client, USD);
+        fund(adminKey, newKey(), body(account, "100", "\"BANK-REF-7\""));
+        String key = newKey();
+        HttpApi.Response transfer = api.send(
+                "POST", "/v1/transfers", adminKey, """
+                {"sourceAccountId": "%s", "destinationAccountId": "%s", "amount": {"amount": 40, "currency": "USD"}}
+                """.formatted(account, savings), Map.of("Idempotency-Key", key));
+        assertThat(transfer.status()).as(transfer.body()).isEqualTo(201);
+
+        HttpApi.Response funding = fund(adminKey, key, body(account, "40", "\"BANK-REF-8\""));
+
+        assertThat(funding.status()).as(funding.body()).isEqualTo(422);
+        assertThat(funding.json().get("type").asString()).isEqualTo("/problems/idempotency-key-reused");
+        assertThat(balance(account)).isEqualTo(usd(60));
     }
 
     private HttpApi.Response fund(String authorization, String idempotencyKey, String body) {

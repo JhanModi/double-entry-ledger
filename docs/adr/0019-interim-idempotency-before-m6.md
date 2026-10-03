@@ -1,6 +1,6 @@
 # ADR-0019: Interim idempotency until M6
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0023
 - **Date:** 2026-10-02
 
 ## Context

@@ -108,6 +108,8 @@ Retries can hide a bug: with them, a broken lock order would just look slow. Tha
 
 The response has a `Retry-After: 1` header: wait a second before retrying. Many HTTP clients already retry a 503 by themselves.
 
+(Since M6, 409 has a second problem type, `request-in-progress`: another request with the same key hasn't finished. It's told apart from `duplicate-request` by its `type`; primer 06, section 7.)
+
 ---
 
 ## 8. Testing concurrency without guessing

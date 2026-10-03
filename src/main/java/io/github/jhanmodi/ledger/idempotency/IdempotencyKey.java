@@ -1,12 +1,13 @@
-package io.github.jhanmodi.ledger.transfers;
+package io.github.jhanmodi.ledger.idempotency;
 
 import java.util.Objects;
 import java.util.regex.Pattern;
 
 /**
- * A key the client chooses for a money-moving request, so a retry can never move the money twice (ADR-0019). Unique
- * per client. 1 to 255 characters from {@code A-Z a-z 0-9 _ . : -}, the same rule as the database CHECK, so UUIDs and
- * keys like {@code order-123:attempt_2} work, and control characters and spaces can't reach the logs.
+ * A key the client chooses for a money-moving request, so a retry is answered with the original's result instead of
+ * moving the money again (ADR-0023). Unique per client, across every operation. 1 to 255 characters from
+ * {@code A-Z a-z 0-9 _ . : -}, the same rule as the database CHECKs, so UUIDs and keys like
+ * {@code order-123:attempt_2} work, and control characters and spaces can't reach the logs.
  */
 public record IdempotencyKey(String value) {
 

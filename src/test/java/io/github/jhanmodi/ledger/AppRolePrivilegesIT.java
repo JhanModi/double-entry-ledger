@@ -15,7 +15,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * What the application's database login may and may not do (ADR-0015). This is the specification for the GRANT
- * statements in the migrations (V3, V4, and V5).
+ * statements in the migrations (V3 to V6).
  *
  * <p>The rest of the integration suite proves the grants are <em>enough</em>, because all of it runs as this login.
  * These tests prove they're <em>no more</em> than enough. Each denial must fail with Postgres's "insufficient
@@ -75,6 +75,9 @@ class AppRolePrivilegesIT {
                         "currencies: SELECT",
                         "entries: INSERT, SELECT",
                         "fundings: INSERT, SELECT",
+                        // DELETE only for expired claims (ADR-0023). Even if every claim were deleted, the unique
+                        // keys on transfers and fundings still stop a second debit.
+                        "idempotency_keys: DELETE, INSERT, SELECT",
                         "ledger_transactions: INSERT, SELECT",
                         "transfers: INSERT, SELECT");
     }
@@ -135,6 +138,16 @@ class AppRolePrivilegesIT {
     }
 
     @Test
+    void cannotChangeAClaimedIdempotencyKeyOrEmptyTheTable() {
+        // A claim's operation and fingerprint are what a retry is compared with, so the app must never rewrite them.
+        for (String column :
+                List.of("client_id", "idempotency_key", "operation", "request_hash", "created_at", "expires_at")) {
+            assertDenied("UPDATE idempotency_keys SET " + column + " = " + column);
+        }
+        assertDenied("TRUNCATE idempotency_keys");
+    }
+
+    @Test
     void cannotReadUpdateDeleteOrTruncateTheAuditLog() {
         // Even a compromised app can't learn what's in the audit log, or cover its tracks (ADR-0020).
         assertDenied("SELECT count(*) FROM audit_log");
@@ -159,8 +172,14 @@ class AppRolePrivilegesIT {
     @Test
     void cannotDisableTriggers() {
         // Only a table's owner may disable its triggers. The app's login owns nothing.
-        for (String table :
-                List.of("entries", "ledger_transactions", "accounts", "transfers", "fundings", "audit_log")) {
+        for (String table : List.of(
+                "entries",
+                "ledger_transactions",
+                "accounts",
+                "transfers",
+                "fundings",
+                "audit_log",
+                "idempotency_keys")) {
             assertDenied("ALTER TABLE " + table + " DISABLE TRIGGER ALL");
         }
     }

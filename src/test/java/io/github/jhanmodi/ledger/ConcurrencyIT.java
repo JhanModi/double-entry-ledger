@@ -8,6 +8,9 @@ import io.github.jhanmodi.ledger.clients.Caller;
 import io.github.jhanmodi.ledger.clients.ClientId;
 import io.github.jhanmodi.ledger.clients.ClientService;
 import io.github.jhanmodi.ledger.clients.Scope;
+import io.github.jhanmodi.ledger.idempotency.IdempotencyKey;
+import io.github.jhanmodi.ledger.idempotency.IdempotentResult;
+import io.github.jhanmodi.ledger.idempotency.RequestInProgressException;
 import io.github.jhanmodi.ledger.ledger.AccountBalance;
 import io.github.jhanmodi.ledger.ledger.AccountBusyException;
 import io.github.jhanmodi.ledger.ledger.AccountId;
@@ -22,11 +25,9 @@ import io.github.jhanmodi.ledger.ledger.NewEntry;
 import io.github.jhanmodi.ledger.ledger.PostingRequest;
 import io.github.jhanmodi.ledger.ledger.PostingService;
 import io.github.jhanmodi.ledger.money.Money;
-import io.github.jhanmodi.ledger.transfers.DuplicateRequestException;
 import io.github.jhanmodi.ledger.transfers.Funding;
 import io.github.jhanmodi.ledger.transfers.FundingCommand;
 import io.github.jhanmodi.ledger.transfers.FundingService;
-import io.github.jhanmodi.ledger.transfers.IdempotencyKey;
 import io.github.jhanmodi.ledger.transfers.Transfer;
 import io.github.jhanmodi.ledger.transfers.TransferCommand;
 import io.github.jhanmodi.ledger.transfers.TransferService;
@@ -76,13 +77,16 @@ class ConcurrencyIT {
     private static final int MIN_INVARIANT_CHECKS = 3;
     private static final Duration WAIT_LIMIT = Duration.ofMinutes(2);
 
-    /** Every outcome a request may have under contention. Anything else is a bug. */
+    /**
+     * Every outcome a request may have under contention. Anything else is a bug. A repeated key is never refused here:
+     * every repeat sends the same request again, so it's replayed (ADR-0023). "In progress" is allowed because a
+     * repeat may wait for its original longer than the lock timeout on a slow machine.
+     */
     private static final Set<Class<?>> ALLOWED_OUTCOMES = Set.of(
-            Transfer.class,
-            Funding.class,
+            IdempotentResult.class,
             InsufficientFundsException.class,
-            DuplicateRequestException.class,
-            AccountBusyException.class);
+            AccountBusyException.class,
+            RequestInProgressException.class);
 
     @Autowired
     TransferService transfers;
@@ -141,14 +145,6 @@ class ConcurrencyIT {
         Run run = runAtOnce(requests, () -> checks.add(InvariantCheck.now(invariantChecker)));
         List<Object> outcomes = run.outcomes();
 
-        // The run exercised the paths it's meant to: overdraws refused, and repeated keys refused.
-        assertThat(ofType(outcomes, InsufficientFundsException.class))
-                .as("seed %d", seed)
-                .isNotEmpty();
-        assertThat(ofType(outcomes, DuplicateRequestException.class))
-                .as("seed %d", seed)
-                .isNotEmpty();
-
         // Every outcome is one the API has an answer for.
         assertThat(outcomes)
                 .as("seed %d", seed)
@@ -156,10 +152,27 @@ class ConcurrencyIT {
                         .as("unexpected outcome %s (seed %d)", outcome, seed)
                         .contains(outcome.getClass()));
 
+        // What actually happened: the requests that carried out a movement, and the repeats that replayed one.
+        List<Transfer> moved = carriedOut(outcomes, Transfer.class);
+        List<Funding> funded = carriedOut(outcomes, Funding.class);
+        List<Object> replayed = replays(outcomes);
+
+        // The run exercised the paths it's meant to: overdraws refused, and repeated keys replayed.
+        assertThat(ofType(outcomes, InsufficientFundsException.class))
+                .as("seed %d", seed)
+                .isNotEmpty();
+        assertThat(replayed).as("seed %d", seed).isNotEmpty();
+
+        // A replay is exactly the movement its original request carried out, and no movement was carried out twice.
+        List<Object> carriedOut = new ArrayList<>(moved);
+        carriedOut.addAll(funded);
+        assertThat(carriedOut).as("seed %d", seed).doesNotHaveDuplicates();
+        assertThat(replayed)
+                .as("every replay is a movement some request carried out (seed %d)", seed)
+                .allSatisfy(replay -> assertThat(carriedOut).contains(replay));
+
         // Each balance is exactly its starting balance plus what the successful requests moved: nothing reported as
         // done is missing, and nothing moved that wasn't reported.
-        List<Transfer> moved = ofType(outcomes, Transfer.class);
-        List<Funding> funded = ofType(outcomes, Funding.class);
         moved.forEach(transfer -> {
             expected.merge(transfer.source(), -transfer.amount().minorUnits(), Long::sum);
             expected.merge(transfer.destination(), transfer.amount().minorUnits(), Long::sum);
@@ -174,9 +187,11 @@ class ConcurrencyIT {
             assertThat(balance.available().minorUnits()).isNotNegative();
         }
 
-        // Every success has exactly one business row and one audit row, and a key was never applied twice.
+        // Every movement carried out has exactly one business row, one claim, and one audit row, and a key was never
+        // applied twice. (The extra fundings and claims are the four initial fundings.)
         assertThat(rowsFor(client, "transfers")).isEqualTo(moved.size());
         assertThat(rowsFor(client, "fundings")).isEqualTo(funded.size() + ACCOUNTS);
+        assertThat(rowsFor(client, "idempotency_keys")).isEqualTo(moved.size() + funded.size() + ACCOUNTS);
         assertThat(audited(
                         "TRANSFER_CREATED",
                         moved.stream().map(t -> t.id().toString()).toList()))
@@ -363,9 +378,32 @@ class ConcurrencyIT {
         return outcomes.stream().filter(type::isInstance).map(type::cast).toList();
     }
 
+    /** The values of type {@code type} that a request carried out itself, rather than replayed. */
+    private static <T> List<T> carriedOut(List<Object> outcomes, Class<T> type) {
+        return ofType(outcomes, IdempotentResult.class).stream()
+                .filter(result -> !result.replayed())
+                .map(IdempotentResult::value)
+                .filter(type::isInstance)
+                .map(type::cast)
+                .toList();
+    }
+
+    /** The values that repeated requests got back as replays. */
+    private static List<Object> replays(List<Object> outcomes) {
+        return ofType(outcomes, IdempotentResult.class).stream()
+                .filter(IdempotentResult::replayed)
+                .<Object>map(IdempotentResult::value)
+                .toList();
+    }
+
     private static Map<String, Long> countByOutcome(List<Object> outcomes) {
         Map<String, Long> counts = new TreeMap<>();
-        outcomes.forEach(outcome -> counts.merge(outcome.getClass().getSimpleName(), 1L, Long::sum));
+        outcomes.forEach(outcome -> {
+            String name = outcome instanceof IdempotentResult<?> result
+                    ? result.value().getClass().getSimpleName() + (result.replayed() ? " (replayed)" : "")
+                    : outcome.getClass().getSimpleName();
+            counts.merge(name, 1L, Long::sum);
+        });
         return counts;
     }
 
