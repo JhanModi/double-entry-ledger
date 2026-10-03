@@ -28,11 +28,22 @@ The proposal was approved on 2026-10-02 with these decisions:
    - **Request ids,** moved here from checkpoint 4 because an API-key audit row requires one: `RequestIdFilter` runs before authentication and puts the id in the MDC, the `X-Request-Id` header, and a request attribute. Each request leaves one log line (method, route template, status); that's where rejected requests like 401s are recorded.
    - **Tests:** `./mvnw verify` is green: 78 unit tests and 139 integration tests.
    - **Planted-bug check:** account opening not audited, `REQUIRED` instead of `MANDATORY`, `createClientWithKey` not transactional, MDC never cleared, and the client's `X-Request-Id` trusted. Each was caught.
-3. 🚧 **Services:** transfers, funding, amount limits.
-4. ⏳ **HTTP:** endpoints, security rules, business errors (with `requestId` in Problem Details), strict JSON, ArchUnit module rules; remove the unused `spring-boot-starter-security-test`.
+3. ✅ **Services:**
+   - **`TransferService` and `FundingService`:** one transaction each, started with a `TransactionTemplate` so a duplicate that loses the race can be identified after rolling back.
+   - **Checks on every movement:** the idempotency key is checked first; accounts are owner-scoped, with the side named for transfers; currencies must match; the scope is checked in the service too (`Caller.requireScope`).
+   - **Supporting types:** `AmountLimits` with its spec (design §10, "Amount limits"); `IdempotencyKey`; typed errors; `LedgerQueries.systemAccount` (by purpose).
+   - **Tests:** `./mvnw verify` is green: 109 unit tests and 161 integration tests.
+     - The race tests include a deterministic one: the first request's transaction is held open until the duplicate is blocked on its lock, so the unique-key path runs every time.
+     - Also an 8-way identical-request test and a 20-way overdraw smoke test.
+     - `TransferServiceIT` passed 5 out of 5 repeated runs.
+   - **Planted-bug check, all 7 caught:** a lost race leaking a raw database error, no destination ownership check, no key check first, funding without `admin`, maximum off by one, wrong settlement currency, and a transfer not audited.
+     - Without the destination ownership check, the composite foreign key still refused the row and rolled the whole transfer back.
+   - **For checkpoint 4:** domain `IllegalArgumentException`s (a zero amount, say) must never reach the API. Bean Validation has to reject those inputs first with 400, or they'd surface as 500s.
+4. 🚧 **HTTP:** endpoints, security rules, business errors (with `requestId` in Problem Details), strict JSON, ArchUnit module rules; remove the unused `spring-boot-starter-security-test`.
 5. ⏳ **Docs and close:** design doc, glossary, README, primer 04, CLAUDE.md, and the end-to-end run.
 
 ### Known gaps carried forward (not failures)
+- **Key revocation isn't audited.** `ClientService.revokeKey` has no caller outside tests yet. When a revoke command is built, it must record an `API_KEY_REVOKED` action in the same transaction. That needs a migration, because the allowed actions are a database CHECK (`audit_log_action_known`).
 - **Constant-time comparison** is verified by code review, not by a test, because timing tests are unreliable.
 - **Mockito prints a "self-attaching" warning** during integration tests. It's harmless today but will break on a future JDK. Fix it later by adding Mockito as a Java agent in the Surefire/Failsafe `argLine`.
 

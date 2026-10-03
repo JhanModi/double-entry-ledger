@@ -14,7 +14,7 @@ import java.util.Objects;
 public record PostingRequest(LedgerTransactionType type, String description, List<NewEntry> entries) {
 
     /** Matches the {@code ledger_transactions_description_length} constraint, which counts characters. */
-    static final int MAX_DESCRIPTION_LENGTH = 500;
+    public static final int MAX_DESCRIPTION_LENGTH = 500;
 
     public PostingRequest {
         Objects.requireNonNull(type, "type");

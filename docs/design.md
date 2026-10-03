@@ -225,6 +225,25 @@ Only `multiply(factor, roundingMode)` rounds. It always rounds to a whole minor 
 - A larger ratio never gets a smaller part.
 - The same input always gives the same parts.
 
+### Amount limits (M4b)
+
+Implemented in `transfers.AmountLimits` ([ADR-0018](adr/0018-transfers-and-funding-over-the-ledger.md), D4). Every example below is a test in `AmountLimitsTest`.
+
+**Rule:** a single transfer or funding moves at most a fixed maximum in its currency. The maximum itself is allowed; one minor unit more is not. Each maximum is roughly a million US dollars of real value, so the cap means the same thing in every currency.
+
+| Currency | Maximum | In minor units | Allowed | Rejected |
+|---|---|---|---|---|
+| USD | 1,000,000.00 | 100,000,000 | 1,000,000.00 | 1,000,000.01 |
+| EUR | 1,000,000.00 | 100,000,000 | 1,000,000.00 | 1,000,000.01 |
+| JPY | 150,000,000 | 150,000,000 | ¥150,000,000 | ¥150,000,001 |
+| KWD | 300,000.000 | 300,000,000 | 300,000.000 | 300,000.001 |
+
+**Why a fixed number of minor units would be wrong:** 100,000,000 minor units is $1,000,000.00, but only ¥100,000,000 (about $670,000) and 100,000.000 KWD (about $325,000). A single cap in minor units, or in major units, would mean very different real amounts per currency.
+
+**What it is not:** a per-client or per-day risk limit. It's a sanity cap against wrong input, such as a misplaced decimal point or a confused currency. A violation is a 422 that states the maximum. Amounts must also be positive; that's a 400, because a zero or negative amount is malformed input rather than a business decision.
+
+**Adding a currency:** `AmountLimits.maximum` switches over every currency with no default branch, so the build fails until the new currency has a limit.
+
 ## 11. Operations
 
 *Filled in from M11 and M14:* reconciliation, metrics, dashboards, and runbooks (e.g., resolving NEEDS_REVIEW).

@@ -16,6 +16,7 @@ import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -34,7 +35,7 @@ public final class LedgerFixtures {
     private final AccountService accounts;
     private final PostingService postings;
     private final ClientService clients;
-    private final Map<ClientId, AuthenticatedClient> keys = new HashMap<>();
+    private final Map<KeyFor, AuthenticatedClient> keys = new HashMap<>();
     private ClientId client;
 
     public LedgerFixtures(AccountService accounts, PostingService postings, ClientService clients) {
@@ -59,14 +60,21 @@ public final class LedgerFixtures {
         return accounts.openCustomerAccount(caller(owner), currency);
     }
 
-    /** This client making a new request: its fixtures key, a fresh request id, and {@link #TEST_SOURCE_IP}. */
+    /** This client making a new request with a read and write key: a fresh request id, from {@link #TEST_SOURCE_IP}. */
     public Caller caller(ClientId owner) {
-        AuthenticatedClient authenticated = keys.computeIfAbsent(owner, id -> {
-            IssuedApiKey key = clients.issueKey(id, EnumSet.of(Scope.READ, Scope.WRITE));
-            return new AuthenticatedClient(id, key.keyId(), key.scopes());
+        return caller(owner, EnumSet.of(Scope.READ, Scope.WRITE));
+    }
+
+    /** As {@link #caller(ClientId)}, with a key that has exactly these scopes (issued once per client and scopes). */
+    public Caller caller(ClientId owner, Set<Scope> scopes) {
+        AuthenticatedClient authenticated = keys.computeIfAbsent(new KeyFor(owner, Set.copyOf(scopes)), want -> {
+            IssuedApiKey key = clients.issueKey(want.owner(), want.scopes());
+            return new AuthenticatedClient(want.owner(), key.keyId(), key.scopes());
         });
         return new Caller(authenticated, new RequestId(UUID.randomUUID()), TEST_SOURCE_IP);
     }
+
+    private record KeyFor(ClientId owner, Set<Scope> scopes) {}
 
     /** A bank-settlement account: an asset, so debits increase it. */
     public AccountId bank(CurrencyCode currency) {

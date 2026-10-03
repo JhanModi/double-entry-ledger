@@ -72,6 +72,15 @@ class AccountRepository {
                 .optional();
     }
 
+    Optional<Account> findSystemAccount(AccountPurpose purpose, CurrencyCode currency) {
+        return jdbc.sql("SELECT " + COLUMNS
+                        + " FROM accounts WHERE kind = 'SYSTEM' AND purpose = :purpose AND currency = :currency")
+                .param("purpose", purpose.name())
+                .param("currency", currency.name())
+                .query(ACCOUNT)
+                .optional();
+    }
+
     List<Account> findAll(Collection<AccountId> ids) {
         return jdbc.sql("SELECT " + COLUMNS + " FROM accounts WHERE id IN (:ids)")
                 .param("ids", ids.stream().map(AccountId::value).toList())

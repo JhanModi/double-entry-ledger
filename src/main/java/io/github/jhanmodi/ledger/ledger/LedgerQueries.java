@@ -61,6 +61,15 @@ public class LedgerQueries {
         return accounts.findOwnedBy(owner, id).orElseThrow(() -> new AccountNotFoundException(id));
     }
 
+    /**
+     * The system account with this purpose and currency, such as USD bank settlement. V5 creates one per currency, so a
+     * missing one means the database is misconfigured: that's an error on our side, never the caller's.
+     */
+    public Account systemAccount(AccountPurpose purpose, CurrencyCode currency) {
+        return accounts.findSystemAccount(purpose, currency)
+                .orElseThrow(() -> new IllegalStateException("no " + purpose + " account for " + currency));
+    }
+
     @Transactional(readOnly = true)
     public AccountBalance balance(AccountId id) {
         Account account = account(id);

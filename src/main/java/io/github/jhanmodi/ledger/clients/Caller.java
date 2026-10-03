@@ -21,6 +21,13 @@ public record Caller(AuthenticatedClient client, RequestId requestId, String sou
         return client.clientId();
     }
 
+    /** Throws {@link ScopeRequiredException} unless the caller's key has this scope. */
+    public void requireScope(Scope scope) {
+        if (!client.scopes().contains(scope)) {
+            throw new ScopeRequiredException(scope);
+        }
+    }
+
     /** This caller as the audit log records it. */
     public Actor auditActor() {
         return new Actor.ApiKey(client.clientId().value(), client.keyId(), requestId, sourceIp);
