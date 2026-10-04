@@ -27,6 +27,8 @@ An ADR records one significant decision: the context, the options considered, wh
 | [0021](0021-request-ids-and-strict-request-parsing.md) | Request ids and strict request parsing | Accepted |
 | [0022](0022-lock-timeouts-retries-and-the-busy-response.md) | Lock timeouts, deadlock retries, and the busy response | Accepted |
 | [0023](0023-idempotency-with-claim-first-and-replay.md) | Idempotency with a claim first and a replay | Accepted |
+| [0024](0024-hand-written-openapi-spec-checked-against-the-code.md) | A hand-written OpenAPI spec, checked against the code | Accepted |
+| [0025](0025-license-and-public-repository-contents.md) | The license, and what the public repository contains | Accepted |
 
 ## Template
 

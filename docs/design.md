@@ -21,6 +21,8 @@ A backend service that moves money between accounts the way real financial syste
 
 A modular monolith: one Spring Boot app and one PostgreSQL database ([ADR-0001](adr/0001-modular-monolith.md)).
 
+This sketch is the target, including modules not built yet (payments, fx, outbox, reconciliation, Kafka). Diagrams of what exists today, the transfer flow, and the data model are in [architecture.md](architecture.md).
+
 ```
 API client ──HTTPS + API key──▶ ┌──────────── Spring Boot app (modular monolith) ────────────┐
                                 │ API layer: auth filter → controllers → validation          │

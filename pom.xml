@@ -14,13 +14,16 @@
     <artifactId>double-entry-ledger</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>double-entry-ledger</name>
-    <description>Double-entry ledger and payments API</description>
+    <description>Double-entry ledger and transfers API</description>
 
-    <!-- Empty on purpose: stops this project from inheriting Spring's own URL, license, developers, and SCM.
-         The license is chosen in M7. -->
+    <!-- Set or left empty on purpose, so this project doesn't inherit Spring's own URL, license, developers, and SCM.
+         The license was chosen in M7 (ADR-0025). -->
     <url/>
     <licenses>
-        <license/>
+        <license>
+            <name>MIT</name>
+            <url>https://opensource.org/license/mit</url>
+        </license>
     </licenses>
     <developers>
         <developer/>

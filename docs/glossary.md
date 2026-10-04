@@ -71,6 +71,7 @@ The terms used in code, docs, and the API. Use them consistently, and add to thi
 - **Reconciliation.** Comparing our ledger against an external record (the bank statement) and flagging differences. It never auto-corrects.
 - **Defense in depth.** Guarding one rule in more than one layer, so a mistake in one layer isn't enough to break it. For example, the scope is checked by the security rules and again by the service, and ownership by the query and again by a composite foreign key. Each layer needs its own test, because one layer can hide that another is broken.
 - **Race test.** A test that makes two operations overlap and checks the result is still correct. Here, threads start together on a latch, and a test that needs one exact interleaving holds a transaction open and waits until Postgres reports the other is blocked, rather than sleeping.
+- **Planted-bug check.** Deliberately putting a bug into a copy of the code, such as dropping a lock or an ownership check, to confirm that a test fails. It tests the tests: a suite that stays green with the bug in place isn't protecting that rule.
 - **Lock, then check, then write.** How a posting stays correct under concurrency (ADR-0005): lock the accounts, re-read what can change (status, balances) under the lock, check it, and only then write. Nothing can change the locked values before the commit, so the check can't go stale.
 - **Lock order.** The one order in which every posting locks accounts: ascending id. Two postings can then never each hold a lock the other is waiting for.
 - **Deadlock.** Two transactions each waiting for a lock the other holds. Postgres notices after `deadlock_timeout` (1 second) and aborts one of them with SQLSTATE `40P01`.
@@ -116,5 +117,7 @@ The terms used in code, docs, and the API. Use them consistently, and add to thi
 - **Actor.** Who performed an audited action: an API key (with its client, request, and address) or the operator at the command line.
 - **Strict parsing.** Request JSON is read without guessing: an amount must be a JSON integer (never `10.5`, `"1050"`, or `1e3`), and an unknown field is an error rather than being ignored.
 - **Tenant isolation.** A client can never see or move another client's money.
+- **OpenAPI spec.** The standard machine-readable description of a REST API: its paths, parameters, request and response bodies, and errors. This API's is written by hand, in `docs/openapi.yaml`, as its contract (ADR-0024).
+- **Spec drift.** When the spec and the code stop agreeing, such as a field renamed in the code but not in the spec. `OpenApiSpecIT` fails the build on the drift it can see.
 - **FX quote.** A locked exchange rate with an expiry, single-use, bound to one client and currency pair.
 - **Spread.** The difference between the market rate and the quoted rate. The platform's FX revenue, posted to a fee account.

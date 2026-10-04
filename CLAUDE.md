@@ -9,14 +9,17 @@ Guidance for Claude Code in this repository. Read all of it before doing any wor
 - **The owner's goal:** to understand every engineering decision and be able to defend it in an interview. Claude acts as a senior software architect and mentor, not a code generator.
 - **Project name:** `double-entry-ledger`.
 - **Product:** a double-entry ledger and payments API (backend only). API clients are businesses. They hold customer accounts, move money between them with instant transfers, and send or receive payments through a simulated bank. Every movement is a balanced, append-only posting, and balances can be proven correct.
-- **Status (2026-10-03):** M6 (idempotency: the key claimed first in the operation's transaction, request fingerprints, replay, expiry cleanup; ADR-0023) is closed: CI green on `cd11a2e`, teach-back answered. Next is M7 (resume checkpoint), starting with its proposal. No JPA: `JdbcClient` everywhere.
+- **Status (2026-10-04):** M7 (resume checkpoint) is implemented and in review. It added the README, `docs/architecture.md`, the OpenAPI spec (checked by `OpenApiSpecIT` and linted in CI; ADR-0024), the demo script and its transcript, the MIT license and `SECURITY.md` (ADR-0025), and the split of the roadmap from the milestone log. Next: CI green on its commit, the teach-back, then the M8 proposal. No JPA: `JdbcClient` everywhere.
 
 ### Where things are
-- `docs/roadmap.md`: milestones, their status, and decisions still open. **Check it at the start of every session.**
+- `docs/roadmap.md`: milestones, their status, known gaps, and decisions still open. **Check it at the start of every session.**
+- `docs/milestone-log.md`: each milestone's working notes: tests at close, planted-bug checks, measured numbers, teach-back records.
 - `docs/adr/`: one ADR per architectural decision. Read the relevant ADRs before changing anything they cover.
-- `docs/design.md`: architecture, flows, invariants, failure modes.
+- `docs/architecture.md`: the short tour of what exists, with diagrams. `docs/design.md`: architecture, flows, invariants, failure modes, in full.
+- `docs/openapi.yaml`: the API contract, written by hand (ADR-0024).
 - `docs/glossary.md`: domain terms. Use them exactly as defined.
 - `docs/learning/`: primers and teach-back questions for the owner.
+- `scripts/demo.sh`: the self-checking demo; `docs/demo-transcript.md` is a captured run.
 
 ### Stack (decided)
 - **Language and build:** Java 25 (LTS), Spring Boot 4.x, Maven (with wrapper).
@@ -33,8 +36,9 @@ Guidance for Claude Code in this repository. Read all of it before doing any wor
 - gitleaks v8.30.1 in CI, pinned by image digest
 - jqwik 1.10.1 and ArchUnit 1.5.1 (test only; versions in `pom.xml`)
 - Spring Security and Bean Validation (starters managed by Spring Boot, added in M4a)
+- Redocly CLI 2.57.0 in CI, pinned by image digest, lints `docs/openapi.yaml` (M7, ADR-0024)
 
-Maven versions live in `pom.xml`, and Dependabot proposes Maven and GitHub Actions updates. The gitleaks image in `ci.yml` is bumped by hand.
+Maven versions live in `pom.xml`, and Dependabot proposes Maven and GitHub Actions updates. The gitleaks and Redocly images in `ci.yml` are bumped by hand (tag and digest together).
 
 ### Commands
 - `./mvnw verify` (`.\mvnw verify` in PowerShell): compile, unit tests, integration tests, and format check. This is exactly what CI runs. **Docker must be running.**
@@ -43,9 +47,10 @@ Maven versions live in `pom.xml`, and Dependabot proposes Maven and GitHub Actio
 - `./mvnw test "-Dtest=MoneyAllocation*"`: run only matching test classes (quoted so PowerShell passes it through intact).
   - **Gotcha:** `-Dtest` *replaces* Surefire's `*Test` pattern, so an exclusion like `"-Dtest=!Foo*"` also makes Surefire run the `*IT` classes.
 - `docker compose up -d`, then `./mvnw spring-boot:run`: local database and app. Health check at `http://localhost:8080/actuator/health`.
+- `bash scripts/demo.sh`: the narrated, self-checking demo, against a running app (see the script's header). Needs `jq`.
+- Lint the spec as CI does: the `docker run … redocly/cli … lint docs/openapi.yaml` line in `ci.yml`'s `api-spec` job.
 
 ### Still open (tracked in `docs/roadmap.md`; don't assume answers)
-- License, and whether this file stays in the public repo (M7)
 - Negative-balance policy for forced reversals (M8)
 - Operator identity for cross-tenant admin actions (M8)
 - Rate-limiting library (M15b). It must land before any public deployment (M16). Until then, the authentication and money-moving endpoints are knowingly not rate-limited.
@@ -67,6 +72,8 @@ These apply to every session and every milestone. Details are in the sections re
   - Each one ends with 3–5 teach-back questions. Don't start the next milestone until the owner has answered them.
   - Each one also ends with a short **"Walk me through it"** section: the 2–3 most important pieces of code, explained in plain language the way the owner would explain them in an interview.
   - Update the roadmap status and any affected docs as part of the milestone.
+  - Working notes (checkpoint records, planted-bug checks, measured numbers, teach-back answers) go in `docs/milestone-log.md`. The roadmap holds only status, plans, known gaps, and open decisions.
+  - The repository is public (ADR-0025): everything committed, history included, can be read by anyone.
 - **Claude writes all the code in every milestone** (the owner's permanent rule, 2026-10-02). Don't offer implementation exercises.
 - For every meaningful decision, present the options, their tradeoffs, and a recommendation with reasoning. The owner decides.
 - Briefly explain new concepts (e.g., idempotency keys, optimistic locking) the first time they come up.
@@ -148,6 +155,7 @@ These apply regardless of stack. The concrete architecture is in `docs/design.md
 
 ### API rules (ADR-0016, ADR-0017)
 - **Every new endpoint needs an explicit rule in `SecurityConfiguration`** with the scope it requires. Anything without a rule is denied by design; never replace `denyAll()` with `authenticated()`.
+- **Every API change updates `docs/openapi.yaml` in the same change** (ADR-0024). `OpenApiSpecIT` fails on drift in endpoints, parameters, bodies, fields, required fields, enums, and limits. It can't see status codes, problem types, or descriptions, so a change to error handling must update those by hand.
 - **Client-facing account lookups go through `LedgerQueries.accountOwnedBy(client, id)`.** Never load an account by id and check ownership afterwards. A non-owned account must give the same 404 as a missing one.
 - **The owning client always comes from the authenticated principal**, never from the request body or parameters.
 - **Errors are Problem Details** (`ApiExceptionHandler`), and stack traces and internal messages never reach a response. The catalogue is in `docs/design.md` §8, "Errors".
