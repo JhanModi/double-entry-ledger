@@ -1,0 +1,827 @@
+openapi: 3.1.0
+
+# Written by hand, as the API's contract (ADR-0024). OpenApiSpecIT fails if it disagrees with the code on endpoints,
+# parameters, request and response bodies, fields, required fields, enum values, or validation limits. Status codes,
+# problem types, and descriptions are checked by review against the API tests (*ApiIT).
+
+info:
+  title: double-entry-ledger API
+  version: v1
+  summary: A double-entry ledger and transfers API.
+  description: |
+    API clients are businesses. Each client opens customer accounts, funds them, and moves money between its own
+    accounts with instant transfers. Every movement is a balanced, append-only ledger posting.
+
+    **Conventions**
+    - **Authentication:** every request sends `Authorization: Bearer <api key>`. Keys carry scopes: `read`, `write`,
+      and `admin`.
+    - **Amounts** are integer minor units plus a currency: `{"amount": 1050, "currency": "USD"}` is $10.50. In a request,
+      anything but a JSON integer (such as `10.5`, `"1050"`, or `1e3`) is a 400.
+    - **Strict JSON:** a field this API doesn't define is a 400.
+    - **Retries:** every money-moving POST needs an `Idempotency-Key` header. Repeating a request with the same key and
+      body returns the original response, marked `Idempotent-Replayed: true`, and never moves money twice. Replays are
+      available for at least 24 hours.
+    - **Errors** are RFC 9457 Problem Details (`application/problem+json`). Tell errors apart by `type`, not by status:
+      409, for example, has two types that mean different things.
+    - **Request ids:** every response has an `X-Request-Id` header, and every error repeats it as `requestId`.
+    - **Tenant isolation:** another client's account or transfer is a 404, exactly like one that doesn't exist.
+
+    Standard HTTP errors not listed per endpoint, such as 415 for a body that isn't sent as JSON, are Problem Details
+    too, with a `requestId` but no `type` (which RFC 9457 reads as `about:blank`).
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local development (see the README)
+
+security:
+  - apiKey: []
+
+tags:
+  - name: Accounts
+    description: Customer accounts, their balances, and their history.
+  - name: Transfers
+    description: Instant movements between two accounts of the same client.
+  - name: Fundings
+    description: Money entering a customer account. Stands in for a bank deposit until real bank payments exist.
+
+paths:
+  /v1/accounts:
+    post:
+      tags: [Accounts]
+      operationId: openAccount
+      summary: Open a customer account
+      description: Opens an account in one currency, owned by the calling client. Needs the `write` scope.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OpenAccountRequest"
+            example:
+              currency: USD
+      responses:
+        "201":
+          description: The account was opened. Its balance starts at zero.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+            Location:
+              $ref: "#/components/headers/Location"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/accounts/{accountId}:
+    get:
+      tags: [Accounts]
+      operationId: getAccount
+      summary: Read an account and its balance
+      description: Needs the `read` scope.
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      responses:
+        "200":
+          description: The account.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/AccountNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/accounts/{accountId}/entries:
+    get:
+      tags: [Accounts]
+      operationId: listAccountEntries
+      summary: Read an account's history
+      description: |
+        The account's ledger entries, newest first, one page at a time. To read the next page, pass the response's
+        `nextCursor` as `cursor`. Needs the `read` scope.
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - name: cursor
+          in: query
+          required: false
+          description: The `nextCursor` of the previous page. Omit it for the first page.
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          required: false
+          description: The most entries to return.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: One page of entries.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EntryPage"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/AccountNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/transfers:
+    post:
+      tags: [Transfers]
+      operationId: createTransfer
+      summary: Move money between two of the client's accounts
+      description: |
+        Debits the source account and credits the destination in one balanced posting. Both accounts must belong to the
+        calling client and be in the amount's currency. Needs the `write` scope.
+
+        Safe to retry: see `Idempotency-Key`.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransferRequest"
+            example:
+              sourceAccountId: 0199a8f2-5d1e-7c3a-9b40-2f6c8e1d4a01
+              destinationAccountId: 0199a8f2-6b3f-7e21-8c55-7a9d0b3e5f02
+              amount:
+                amount: 25000
+                currency: USD
+              description: rent
+      responses:
+        "201":
+          description: |
+            The transfer was made. A retry with the same `Idempotency-Key` and body gets this same response again,
+            with `Idempotent-Replayed: true`, and moves nothing.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+            Location:
+              $ref: "#/components/headers/Location"
+            Idempotent-Replayed:
+              $ref: "#/components/headers/IdempotentReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transfer"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: |
+            The client has no account with the `sourceAccountId` or `destinationAccountId` given. The detail names
+            which one. Another client's account gets this same answer.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties:
+                      type:
+                        const: /problems/account-not-found
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "422":
+          description: |
+            Well-formed, but refused by the business rules. Nothing moved.
+            - `idempotency-key-reused`: the key was already used for a different request.
+            - `insufficient-funds`: the source's available balance is too low.
+            - `currency-mismatch`: an account isn't in the amount's currency.
+            - `same-account`: the source and destination are the same account.
+            - `account-closed`: an account is closed.
+            - `amount-too-large`: above the currency's maximum, which the problem states as `maximum`.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties:
+                      type:
+                        enum:
+                          - /problems/idempotency-key-reused
+                          - /problems/insufficient-funds
+                          - /problems/currency-mismatch
+                          - /problems/same-account
+                          - /problems/account-closed
+                          - /problems/amount-too-large
+                      maximum:
+                        $ref: "#/components/schemas/Money"
+              example:
+                type: /problems/insufficient-funds
+                title: Insufficient funds
+                status: 422
+                detail: The source account's available balance is too low for this amount.
+                instance: /v1/transfers
+                requestId: 0199a8f3-0e4b-7d2c-a1f6-3b8e9c0d7e15
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AccountBusy"
+
+  /v1/transfers/{transferId}:
+    get:
+      tags: [Transfers]
+      operationId: getTransfer
+      summary: Read a transfer
+      description: Needs the `read` scope.
+      parameters:
+        - name: transferId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The transfer.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transfer"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The client has no transfer with this id. Another client's transfer gets this same answer.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties:
+                      type:
+                        const: /problems/transfer-not-found
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/fundings:
+    post:
+      tags: [Fundings]
+      operationId: createFunding
+      summary: Fund one of the client's accounts
+      description: |
+        Credits one of the calling client's accounts and debits the platform's bank-settlement account for that
+        currency. It stands in for an inbound bank deposit until real bank payments exist. Needs the `admin` scope.
+        There's no endpoint to read a funding back yet: its effect shows in the account's balance and history.
+
+        Safe to retry: see `Idempotency-Key`.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FundingRequest"
+            example:
+              accountId: 0199a8f2-5d1e-7c3a-9b40-2f6c8e1d4a01
+              amount:
+                amount: 100000
+                currency: USD
+              externalReference: BANK-REF-1
+      responses:
+        "201":
+          description: |
+            The account was funded. A retry with the same `Idempotency-Key` and body gets this same response again,
+            with `Idempotent-Replayed: true`, and moves nothing.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+            Idempotent-Replayed:
+              $ref: "#/components/headers/IdempotentReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Funding"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/AccountNotFound"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "422":
+          description: |
+            Well-formed, but refused by the business rules. Nothing moved.
+            - `idempotency-key-reused`: the key was already used for a different request, including a transfer.
+            - `currency-mismatch`: the account isn't in the amount's currency.
+            - `account-closed`: the account is closed.
+            - `amount-too-large`: above the currency's maximum, which the problem states as `maximum`.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties:
+                      type:
+                        enum:
+                          - /problems/idempotency-key-reused
+                          - /problems/currency-mismatch
+                          - /problems/account-closed
+                          - /problems/amount-too-large
+                      maximum:
+                        $ref: "#/components/schemas/Money"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AccountBusy"
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: dbl_<key id>_<secret>
+      description: |
+        An API key, created with the app's command line (`clients create`) and shown once. Send it as
+        `Authorization: Bearer dbl_<key id>_<secret>`. A missing, invalid, or revoked key is a 401; a key without the
+        endpoint's scope is a 403.
+
+  parameters:
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Chosen by the client, unique per request it means to make once. Keys belong to the client, across transfers
+        and fundings.
+        - The same key and the same body get the original response again, with `Idempotent-Replayed: true`.
+        - The same key with a different body (or for the other operation) is a 422 `idempotency-key-reused`.
+        - A failed request (4xx or 503) doesn't use up its key: a retry runs again.
+        - After at least 24 hours the original can no longer be replayed, and the key gets 409 `duplicate-request`.
+          It never moves money again.
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_.:-]{1,255}$"
+      example: transfer-2026-10-04-0001
+
+  headers:
+    RequestId:
+      description: The server-generated id of this request. Every error repeats it as `requestId`.
+      schema:
+        type: string
+        format: uuid
+    Location:
+      description: The path of the resource that was created.
+      schema:
+        type: string
+        format: uri-reference
+    IdempotentReplayed:
+      description: Present, and `true`, only when this response replays an earlier request's result.
+      schema:
+        type: string
+        const: "true"
+    RetryAfter:
+      description: How many seconds to wait before retrying.
+      schema:
+        type: integer
+        minimum: 1
+
+  responses:
+    InvalidRequest:
+      description: |
+        Malformed input: a missing or invalid header, a body that isn't JSON, a field this API doesn't define, an amount
+        that isn't a positive JSON integer, or a wrong type in the path or query. `errors` names each field, header,
+        or parameter at fault.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/InvalidRequestProblem"
+          example:
+            type: /problems/invalid-request
+            title: Invalid request
+            status: 400
+            detail: Some of the request's fields are invalid; see errors.
+            instance: /v1/transfers
+            errors:
+              - field: amount.amount
+                message: must be a JSON integer
+            requestId: 0199a8f3-0e4b-7d2c-a1f6-3b8e9c0d7e15
+    Unauthorized:
+      description: No API key, or one that isn't valid. Every kind of bad key gets the same answer.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+        WWW-Authenticate:
+          description: Always `Bearer`.
+          schema:
+            type: string
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    const: /problems/unauthorized
+    Forbidden:
+      description: The API key doesn't have the scope this endpoint needs.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    const: /problems/forbidden
+    AccountNotFound:
+      description: |
+        The client has no account with this id. An account that doesn't exist, another client's account, and the
+        platform's own accounts all get this same answer.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    const: /problems/account-not-found
+    IdempotencyConflict:
+      description: |
+        The `Idempotency-Key` is held, or was once held, by another request. Nothing was done by this one. Tell the two
+        types apart by `type`:
+        - `duplicate-request`: an earlier request with this key was carried out, and it's too old to replay. Done:
+          don't retry. `originalId` identifies what it created.
+        - `request-in-progress`: another request with this key hasn't finished. Retry after `Retry-After` seconds, with
+          the same key and body, to get its result.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    enum:
+                      - /problems/duplicate-request
+                      - /problems/request-in-progress
+                  originalId:
+                    type: string
+                    format: uuid
+                    description: Only on `duplicate-request`.
+    AccountBusy:
+      description: |
+        Other requests held the account for longer than the lock timeout. Nothing moved. Retry after `Retry-After`
+        seconds with the same `Idempotency-Key`.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    const: /problems/account-busy
+    InternalError:
+      description: Something unexpected went wrong. It was logged on the server; the response reveals no internals.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    const: /problems/internal-error
+
+  schemas:
+    Currency:
+      type: string
+      description: An ISO 4217 code. Minor units per major unit vary by currency.
+      enum: [USD, EUR, JPY, KWD]
+
+    Money:
+      type: object
+      description: |
+        An amount in integer minor units, plus its currency. USD and EUR have 2 decimal places, JPY 0, and KWD 3:
+        `{"amount": 1050, "currency": "USD"}` is $10.50, and `{"amount": 1050, "currency": "KWD"}` is 1.050 KWD.
+      required: [amount, currency]
+      properties:
+        amount:
+          type: integer
+          format: int64
+        currency:
+          $ref: "#/components/schemas/Currency"
+
+    AmountRequest:
+      type: object
+      description: |
+        An amount to move, in integer minor units. It must be a positive JSON integer. The most one request may move
+        is 1,000,000.00 USD, 1,000,000.00 EUR, 150,000,000 JPY, or 300,000.000 KWD; above that is a 422
+        `amount-too-large`.
+      additionalProperties: false
+      required: [amount, currency]
+      properties:
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+        currency:
+          $ref: "#/components/schemas/Currency"
+
+    OpenAccountRequest:
+      type: object
+      additionalProperties: false
+      required: [currency]
+      properties:
+        currency:
+          $ref: "#/components/schemas/Currency"
+
+    Account:
+      type: object
+      required: [id, currency, status, balance]
+      properties:
+        id:
+          type: string
+          format: uuid
+        currency:
+          $ref: "#/components/schemas/Currency"
+        status:
+          type: string
+          description: A closed account can't send or receive money.
+          enum: [OPEN, CLOSED]
+        balance:
+          $ref: "#/components/schemas/Balance"
+
+    Balance:
+      type: object
+      description: All three are in the account's currency. `available` is `posted` minus `held`, and is never negative.
+      required: [posted, held, available]
+      properties:
+        posted:
+          $ref: "#/components/schemas/Money"
+        held:
+          $ref: "#/components/schemas/Money"
+        available:
+          $ref: "#/components/schemas/Money"
+
+    Entry:
+      type: object
+      description: |
+        One line of a ledger posting that touched this account. Amounts are always positive; `direction` says which
+        side. For a customer account, a credit increases the balance and a debit decreases it.
+      required: [id, transactionId, type, description, effectiveDate, recordedAt, direction, amount]
+      properties:
+        id:
+          type: string
+          format: uuid
+        transactionId:
+          type: string
+          format: uuid
+          description: The ledger transaction this entry belongs to. Its entries always balance.
+        type:
+          type: string
+          enum: [TRANSFER, FUNDING]
+        description:
+          type: [string, "null"]
+        effectiveDate:
+          type: string
+          format: date
+          description: The business date of the posting.
+        recordedAt:
+          type: string
+          format: date-time
+          description: When the posting was recorded, in UTC.
+        direction:
+          type: string
+          enum: [DEBIT, CREDIT]
+        amount:
+          $ref: "#/components/schemas/Money"
+
+    EntryPage:
+      type: object
+      required: [entries, nextCursor]
+      properties:
+        entries:
+          type: array
+          description: Newest first.
+          items:
+            $ref: "#/components/schemas/Entry"
+        nextCursor:
+          type: [string, "null"]
+          format: uuid
+          description: Pass as `cursor` to read the next page. Null on the last page.
+
+    TransferRequest:
+      type: object
+      additionalProperties: false
+      required: [sourceAccountId, destinationAccountId, amount]
+      properties:
+        sourceAccountId:
+          type: string
+          format: uuid
+        destinationAccountId:
+          type: string
+          format: uuid
+        amount:
+          $ref: "#/components/schemas/AmountRequest"
+        description:
+          type: string
+          maxLength: 500
+          description: Optional. At most 500 characters (Unicode code points).
+
+    Transfer:
+      type: object
+      required:
+        [id, sourceAccountId, destinationAccountId, amount, description, idempotencyKey, ledgerTransactionId, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        sourceAccountId:
+          type: string
+          format: uuid
+        destinationAccountId:
+          type: string
+          format: uuid
+        amount:
+          $ref: "#/components/schemas/Money"
+        description:
+          type: [string, "null"]
+        idempotencyKey:
+          type: string
+        ledgerTransactionId:
+          type: string
+          format: uuid
+          description: The balanced posting that moved the money.
+        createdAt:
+          type: string
+          format: date-time
+
+    FundingRequest:
+      type: object
+      additionalProperties: false
+      required: [accountId, amount, externalReference]
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        amount:
+          $ref: "#/components/schemas/AmountRequest"
+        externalReference:
+          type: string
+          minLength: 1
+          maxLength: 100
+          pattern: "\\S"
+          description: The bank's reference for the deposit. 1 to 100 characters, not all whitespace.
+
+    Funding:
+      type: object
+      required: [id, accountId, amount, externalReference, idempotencyKey, ledgerTransactionId, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        accountId:
+          type: string
+          format: uuid
+        amount:
+          $ref: "#/components/schemas/Money"
+        externalReference:
+          type: string
+        idempotencyKey:
+          type: string
+        ledgerTransactionId:
+          type: string
+          format: uuid
+          description: The balanced posting that moved the money.
+        createdAt:
+          type: string
+          format: date-time
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details. Some types add fields of their own.
+      required: [type, title, status, detail]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: What kind of error this is. Clients branch on this.
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+          description: For people. Its wording may change; don't parse it.
+        instance:
+          type: string
+          format: uri-reference
+          description: The request path. Absent on 401 and 403.
+        requestId:
+          type: string
+          format: uuid
+          description: The same id as the `X-Request-Id` header. Quote it when reporting a problem.
+
+    InvalidRequestProblem:
+      allOf:
+        - $ref: "#/components/schemas/Problem"
+        - type: object
+          required: [errors]
+          properties:
+            type:
+              const: /problems/invalid-request
+            errors:
+              type: array
+              description: Each field, header, or parameter at fault. Empty only when none is, as for a body that isn't JSON.
+              items:
+                $ref: "#/components/schemas/InvalidField"
+
+    InvalidField:
+      type: object
+      required: [field, message]
+      properties:
+        field:
+          type: string
+          description: A JSON path such as `amount.amount`, or a header or parameter name such as `Idempotency-Key`.
+        message:
+          type: [string, "null"]
+          description: What's wrong with it.

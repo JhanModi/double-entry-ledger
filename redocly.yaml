@@ -1,0 +1,9 @@
+# Redocly CLI settings for linting docs/openapi.yaml, in CI and locally (ADR-0024).
+
+extends:
+  # Every rule in Redocly's "recommended" set, with its warnings turned into errors, so a warning fails CI too.
+  - recommended-strict
+
+rules:
+  # The app runs only locally until there's a deployment (M16), so localhost is the true server URL.
+  no-server-example.com: off

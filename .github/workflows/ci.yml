@@ -26,6 +26,25 @@ jobs:
       # verify = compile, unit tests, integration tests (Testcontainers uses the runner's Docker), Spotless check.
       - run: ./mvnw --batch-mode --no-transfer-progress verify
 
+  api-spec:
+    name: API spec lint (Redocly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      # Checks that docs/openapi.yaml is valid OpenAPI, with the rules in redocly.yaml (ADR-0024). OpenApiSpecIT, in
+      # the build job, checks that it matches the code.
+      # Pinned by digest, like gitleaks; bump the tag and digest by hand. No network: the spec has no remote
+      # references, and it keeps the CLI's usage telemetry from leaving the runner (it's also switched off).
+      - run: >
+          docker run --rm --network none
+          -e REDOCLY_TELEMETRY=off -e REDOCLY_SUPPRESS_UPDATE_NOTICE=true
+          -v "$GITHUB_WORKSPACE:/repo" -w /repo
+          redocly/cli:2.57.0@sha256:e320090ecd380878ff2aa671a928d5ac28fcbb7bb6230250d772790811125aea
+          lint docs/openapi.yaml
+
   secret-scan:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest
