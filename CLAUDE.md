@@ -9,7 +9,7 @@ Guidance for Claude Code in this repository. Read all of it before doing any wor
 - **The owner's goal:** to understand every engineering decision and be able to defend it in an interview. Claude acts as a senior software architect and mentor, not a code generator.
 - **Project name:** `double-entry-ledger`.
 - **Product:** a double-entry ledger and payments API (backend only). API clients are businesses. They hold customer accounts, move money between them with instant transfers, and send or receive payments through a simulated bank. Every movement is a balanced, append-only posting, and balances can be proven correct.
-- **Status (2026-10-03):** M6 (idempotency: the key claimed first in the operation's transaction, request fingerprints, replay, expiry cleanup; ADR-0023) is implemented and awaiting the owner's commit, CI, and teach-back. Next is M7. No JPA: `JdbcClient` everywhere.
+- **Status (2026-10-03):** M6 (idempotency: the key claimed first in the operation's transaction, request fingerprints, replay, expiry cleanup; ADR-0023) is closed: CI green on `cd11a2e`, teach-back answered. Next is M7 (resume checkpoint), starting with its proposal. No JPA: `JdbcClient` everywhere.
 
 ### Where things are
 - `docs/roadmap.md`: milestones, their status, and decisions still open. **Check it at the start of every session.**
