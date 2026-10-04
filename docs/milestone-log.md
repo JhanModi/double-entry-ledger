@@ -16,11 +16,11 @@ Until M6, each milestone's detailed checkpoint record lived in `docs/roadmap.md`
 | M4b Transfers, funding, audit log | 2026-10-02 | `f7a8ce3` to `2700cde` | 111 / 182 | 23, all caught | | `2700cde` |
 | M5 Concurrency | 2026-10-03 | `47b1c5f` | 136 / 193 | 20, all caught | 1,000 concurrent requests in 3.6–4.5 s, invariant checker clean | `47b1c5f` |
 | M6 Idempotency | 2026-10-03 | `cd11a2e` | 152 / 236 | 37, all caught | 1,000 requests in 3.87–4.08 s, 77–99 replays per run | `cd11a2e` |
-| M7 Resume checkpoint | in review | | 152 / 242 | 15 spec mismatches, all caught | 1,000 requests in 4.22–4.54 s | this file |
+| M7 Resume checkpoint | 2026-10-04 | `11d6d2c`, `7823160` | 152 / 242 | 15 spec mismatches, all caught | 1,000 requests in 4.22–4.54 s | this file |
 
 ## M7 Resume checkpoint
 
-**Implemented 2026-10-04; in review.** It closes when CI is green on its commit and the teach-back is answered.
+**M7 closed on 2026-10-04:** committed as `11d6d2c` and `7823160`, CI green on `7823160`, and the teach-back answered.
 
 - **Decisions, approved as recommended:**
   - D1-B: a hand-written `docs/openapi.yaml`, checked against the code by `OpenApiSpecIT` and linted in CI by Redocly (ADR-0024).
@@ -57,7 +57,14 @@ Until M6, each milestone's detailed checkpoint record lived in `docs/roadmap.md`
 - **Tests:** `./mvnw clean verify` is green: 152 unit tests and 242 integration tests (6 new).
 - **Measured** (local machine, Testcontainers Postgres, nothing else running): `ConcurrencyIT`'s 1,000 requests took **4.22 to 4.54 seconds** in 4 runs: 3 on their own, and 1 inside the full build. Each run had 78 to 96 replays and 47 to 51 invariant checks during the load, all clean, and no 503s. In M6 it was 3.87 to 4.08 seconds. No production code changed in M7, so the difference comes from the machine, not the code.
 - **Local database:** V6 is now applied locally too; the app ran for the demo.
-- **Teach-back:** ⏳ not answered yet.
+- **The README makes no authorship claim** (the owner's decision).
+- **Teach-back:** all five answers were correct. Refinements given:
+  - Q1: the API tests pin what the code returns; nothing automatically compares that with the spec, so review is what connects the two. Validating every response from the API tests against the spec's schemas would close part of the gap, but needs a JSON Schema validator, a new dependency.
+  - Q2: the job holds few secrets to steal: no persisted git token, read-only permissions, and nothing passed into the container. What `--network none` reliably buys is no downloads and no telemetry. A compromised linter could still report "valid" or change files in the mounted workspace. The runner is fresh and the job publishes nothing, so changes go nowhere; mounting the workspace read-only (`:ro`) would remove that too.
+  - Q3: the waiting requests don't see the uncommitted claim. The unique-index check finds a conflicting entry from an in-progress transaction, and the insert waits for it to end. After the commit, the claim's next statement takes a fresh snapshot and reads the claim. Requests that arrived after the commit take the repeat path at once. If the first had rolled back, one waiting insert would have succeeded, and that request would have done the work.
+  - Q4: the Java check is only trustworthy because of the row lock; without it, two transfers could both read the same balance and both pass. That's M5's planted "no row lock" bug, which the `CHECK` stopped. The `CHECK` is evaluated as each balance update runs, not at commit.
+  - Q5: after a history rewrite and force push, GitHub can still serve old commits by hash (cached views, pull request refs, forks) until support purges them, so rotation comes first. For this project's own API keys, `ClientService.revokeKey` has no command yet (a known gap), so a leaked key would be revoked by hand as the owner today.
+- **After the teach-back, approved by the owner:** the Redocly and gitleaks CI jobs mount the checkout read-only (`:ro`), from the Q2 refinement. Checked locally first: both tools pass with the read-only mount, and a write into it fails with "Read-only file system".
 
 ## M6 Idempotency
 

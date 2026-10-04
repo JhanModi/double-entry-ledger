@@ -4,7 +4,7 @@ The project is built in small milestones, in order. Each opens with a written pr
 
 Status: ✅ done · 🚧 in progress · 🔍 in review · ⏳ not started
 
-**Now:** M7, the resume checkpoint, is implemented and in review. **Next:** M8, reversals.
+**Now:** M8, reversals, starting with its proposal. M7, the resume checkpoint, closed on 2026-10-04.
 
 ## Tier 1: a strong portfolio piece on its own
 
@@ -19,7 +19,7 @@ Status: ✅ done · 🚧 in progress · 🔍 in review · ⏳ not started
 | ✅ | **M4b Transfers, funding, audit log** | Same-client transfers; admin funding of the client's own accounts from seeded bank-settlement accounts; business errors as Problem Details; append-only audit log and request ids; interim idempotency (`Idempotency-Key` plus a unique constraint, 409 on a duplicate); per-currency amount limits; strict JSON (integer amounts only, unknown fields rejected); ArchUnit module rules. |
 | ✅ | **M5 Concurrency** | Ordered locking, `lock_timeout`, retries; 1,000-request and deadlock tests, with the invariant checker (built in M3a) run under concurrency. |
 | ✅ | **M6 Idempotency** | Claim/replay in the same transaction, request hashing, expiry cleanup; same-key concurrency tests. |
-| 🔍 | **M7 Resume checkpoint** | README rewritten as the front page, with a CI badge; architecture doc with diagrams (v1); demo script and a captured run; hand-written OpenAPI spec checked against the code, and linted in CI (ADR-0024); MIT license and `SECURITY.md` (ADR-0025); gitleaks scan of the full history; roadmap split from the milestone log. Repo made public (owner's call). Described as a *ledger and transfers API*. |
+| ✅ | **M7 Resume checkpoint** | README rewritten as the front page, with a CI badge; architecture doc with diagrams (v1); demo script and a captured run; hand-written OpenAPI spec checked against the code, and linted in CI (ADR-0024); MIT license and `SECURITY.md` (ADR-0025); gitleaks scan of the full history; roadmap split from the milestone log. Repo made public (owner's call). Described as a *ledger and transfers API*. |
 | ⏳ | **M8 Reversals** | Admin reversal, `UNIQUE(reverses_txn_id)`, negative-balance policy. |
 
 ## Tier 2: completes all seven features

@@ -38,10 +38,11 @@ jobs:
       # the build job, checks that it matches the code.
       # Pinned by digest, like gitleaks; bump the tag and digest by hand. No network: the spec has no remote
       # references, and it keeps the CLI's usage telemetry from leaving the runner (it's also switched off).
+      # The checkout is mounted read-only (:ro): linting only reads, so the tool can't change the files it checks.
       - run: >
           docker run --rm --network none
           -e REDOCLY_TELEMETRY=off -e REDOCLY_SUPPRESS_UPDATE_NOTICE=true
-          -v "$GITHUB_WORKSPACE:/repo" -w /repo
+          -v "$GITHUB_WORKSPACE:/repo:ro" -w /repo
           redocly/cli:2.57.0@sha256:e320090ecd380878ff2aa671a928d5ac28fcbb7bb6230250d772790811125aea
           lint docs/openapi.yaml
 
@@ -56,7 +57,8 @@ jobs:
           persist-credentials: false
       # Runs the gitleaks CLI image pinned by digest, so a re-pushed tag can't change what runs here.
       # Dependabot doesn't update images used in `run:` steps; bump the tag and digest by hand.
+      # The checkout is mounted read-only (:ro): scanning only reads the history, so the tool can't change it.
       - run: >
-          docker run --rm -v "$GITHUB_WORKSPACE:/repo"
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo:ro"
           zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
           git --redact --verbose /repo
